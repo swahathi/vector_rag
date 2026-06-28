@@ -8,3 +8,4 @@ langchain-groq
 chromadb
 sentence-transformers
 pypdf
+langchain-google-genai
