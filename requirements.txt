@@ -10,3 +10,5 @@ sentence-transformers
 pypdf
 langchain-google-genai
 langchain-milvus
+milvus-lite
+pymilvus
