@@ -24,7 +24,7 @@ MAX_FILES         = 1600
 MAX_TOTAL_MB      = 10_000
 MILVUS_COLLECTION = "rag_docs"
 
-GEMINI_EMBED_MODEL = "models/text-embedding-001"
+GEMINI_EMBED_MODEL = "models/gemini-embedding-001"
 
 # Gemini's embed_documents batches at 100 texts per API call automatically.
 # We control how many *chunks* we hand to add_documents() per iteration to cap
