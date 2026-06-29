@@ -420,7 +420,7 @@ if "vector_db" in st.session_state:
             t_start = time.time()
             res = vector_db.similarity_search_with_relevance_scores(
                 query,
-                k=8
+                k=15
             )
             chroma_retrieval_time_container[0] = round(time.time() - t_start, 4)
             return res
