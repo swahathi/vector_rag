@@ -25,7 +25,10 @@ MAX_FILES         = 50        # Reduced from 1600 to fit within 1GB RAM constrai
 MAX_TOTAL_MB      = 200       # Reduced from 10GB to protect container memory
 MILVUS_COLLECTION = "rag_docs"
 
+<<<<<<< HEAD
 # FIX: Switched from broken text-embedding-004 to active gemini-embedding-001
+=======
+>>>>>>> 8af7fd27396c003ca3cc28e888104704f980f2cd
 GEMINI_EMBED_MODEL = "models/gemini-embedding-001"
 
 INDEX_CHUNK_BATCH = 100       # Reduced from 500 to lower memory spikes
@@ -231,5 +234,139 @@ if uploaded_files and upload_valid and st.button("Process PDFs"):
                 del chunks
                 gc.collect()
 
+<<<<<<< HEAD
         st.session_state.chunk_count = total_chunks
         st.success(f"Successfully processed {pdf_count} files ({total_chunks} chunks)!")
+=======
+            t0 = time.time()
+            ok, n = run_step(f"Indexing:  {uf.name}", _index)
+            index_elapsed += time.time() - t0
+            del chunks        # chunks freed before next PDF
+            if not ok:
+                break
+
+            total_chunks += n
+            logging.info(f"'{uf.name}': {n} chunks indexed.")
+
+        metrics["load_time"]  = round(load_elapsed,  2)
+        metrics["chunk_time"] = round(chunk_elapsed, 2)
+        metrics["index_time"] = round(index_elapsed, 2)
+
+        if not st.session_state.pipeline_failed:
+            total_time = round(time.time() - pipeline_start, 2)
+            db_size_mb = os.path.getsize(SESSION_DB_PATH) / (1024 * 1024) if os.path.exists(SESSION_DB_PATH) else 0.0
+
+            st.session_state.vector_db   = vector_db
+            st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + total_chunks
+            st.session_state.metrics     = metrics
+
+            logging.info(f"Pipeline done: {total_chunks} chunks / {pdf_count} PDFs / {total_time}s")
+            st.success(f"Indexed {total_chunks:,} chunks from {pdf_count} file(s).")
+
+            # ── Metrics dashboard ─────────────────────────────────────────────
+            st.markdown("---")
+            st.subheader("Experiment Metrics")
+
+            init_t = metrics["milvus_init_time"]
+            if db_existed:
+                st.info(f"**Database status:** Loaded existing database — init: {init_t:.2f}s")
+            else:
+                st.success(f"**Database status:** Created new database — init: {init_t:.2f}s")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Milvus initialization",    f"{metrics['milvus_init_time']:.2f}s")
+                st.metric("PDF loading",              f"{metrics['load_time']:.2f}s")
+                st.metric("Chunking",                 f"{metrics['chunk_time']:.2f}s")
+            with c2:
+                st.metric("Indexing (embed + insert)", f"{metrics['index_time']:.2f}s")
+                st.metric("Total processing time",     f"{total_time:.2f}s")
+                st.metric("Vector database size",      f"{db_size_mb:.2f} MB")
+
+            st.markdown("**Run summary**")
+            st.write(f"PDFs processed: **{pdf_count}**")
+            st.write(f"Dataset size: **{dataset_size_mb:.2f} MB**")
+            st.write(f"Total chunks indexed: **{total_chunks:,}**")
+
+# --------------------------------------------------
+# RECONNECT TO EXISTING SESSION DB ON RERUN
+# --------------------------------------------------
+
+if "vector_db" not in st.session_state and os.path.exists(SESSION_DB_PATH):
+    try:
+        st.session_state.vector_db = _open_milvus(SESSION_DB_PATH)
+        logging.info(f"Reconnected to existing session DB: {SESSION_DB_PATH}")
+    except Exception as exc:
+        logging.error(f"Failed to reconnect to session DB: {exc}")
+        st.warning(f"Could not load your existing database: {exc}")
+
+# --------------------------------------------------
+# QUESTION ANSWERING
+# --------------------------------------------------
+
+if "vector_db" in st.session_state:
+    vector_db = st.session_state.vector_db
+    query     = st.text_input("Ask a question", placeholder="Ask something about the uploaded PDFs…")
+
+    if st.button("Get Answer") and query:
+        st.session_state.pipeline_failed = False
+        logging.info(f"Query received: {query}")
+
+        # Retrieve ─────────────────────────────────────────────────────────────
+        # similarity_search_with_relevance_scores encodes `query` via
+        # embed_query() which automatically uses RETRIEVAL_QUERY task type.
+        def _retrieve():
+            return vector_db.similarity_search_with_relevance_scores(query, k=8)
+
+        ok, raw_results = run_step("Searching Documents", _retrieve)
+
+        # Build context ────────────────────────────────────────────────────────
+        if ok:
+            def _build_context():
+                ctx_parts, sources = [], set()
+                for doc, _ in raw_results:
+                    src = doc.metadata.get("source_pdf", "Unknown")
+                    sources.add(src)
+                    ctx_parts.append(f"SOURCE: {src}\n\n{doc.page_content}")
+                return "\n\n---\n\n".join(ctx_parts), sources
+
+            ok, (context, sources) = run_step("Building Context", _build_context)
+
+        # Generate answer ──────────────────────────────────────────────────────
+        if ok:
+            prompt = (
+                "You are a document question-answering assistant.\n"
+                "Answer ONLY using the provided context.\n"
+                "If the answer is not present, say: "
+                '"Information not found in retrieved documents."\n\n'
+                f"Context:\n{context}\n\nQuestion:\n{query}"
+            )
+
+            def _answer():
+                return llm.invoke(prompt).content
+
+            ok, answer = run_step("Generating Answer", _answer)
+
+            if ok:
+                logging.info("Answer generated successfully.")
+                st.markdown("## Answer")
+                st.write(answer)
+
+                st.markdown("## Source PDFs")
+                for src in sorted(sources):
+                    st.write(f"- {src}")
+
+                with st.expander("Retrieved Chunks"):
+                    for idx, (doc, score) in enumerate(raw_results, 1):
+                        st.markdown(f"### Chunk {idx}")
+                        st.write(f"**Source:** {doc.metadata.get('source_pdf')}")
+                        st.write(f"**Score:** {score:.4f}")
+                        st.text(doc.page_content[:500])
+                        st.divider()
+
+        if st.session_state.pipeline_failed:
+            st.error("Pipeline stopped due to the failed step above.")
+
+else:
+    st.info("Upload PDFs and click **Process PDFs** to begin.")
+>>>>>>> 8af7fd27396c003ca3cc28e888104704f980f2cd
