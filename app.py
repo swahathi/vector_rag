@@ -1,32 +1,47 @@
+
 import streamlit as st
 import os
+import shutil
 import tempfile
 import time
 import uuid
 import logging
-import gc  # Used for strict memory management
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_chroma import Chroma  # Switched from Milvus to Chroma
+
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+from langchain_classic.embeddings.cache import CacheBackedEmbeddings
+from langchain_classic.storage.file_system import LocalFileStore
+
+from langchain_community.vectorstores import Chroma
+
+from langchain_community.cache import SQLiteCache
+from langchain_core.globals import set_llm_cache
+
 from langchain_groq import ChatGroq
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
 
-st.set_page_config(page_title="Multi PDF RAG System", layout="wide")
-st.title("Multi-PDF Semantic RAG System (Chroma Edition)")
+st.set_page_config(
+    page_title="Multi PDF RAG System",
+    layout="wide"
+)
 
-VECTOR_DB_ROOT    = "./chroma_db"
-LOG_FILE          = "./rag.log"
-MAX_FILES         = 50        
-MAX_TOTAL_MB      = 200       
+st.title("Multi-PDF Semantic RAG System")
 
-# Active, supported embedding endpoint
-GEMINI_EMBED_MODEL = "models/gemini-embedding-001"
-INDEX_CHUNK_BATCH = 100       
+EMBED_CACHE_DIR = "./embedding_cache"
+VECTOR_DB_ROOT  = "./vector_db"
+LOG_FILE        = "./rag.log"
+
+MAX_FILES      = 1600
+MAX_TOTAL_MB   = 10000
+
+CHUNK_SIZE     = 1000
+CHUNK_OVERLAP  = 200
 
 # --------------------------------------------------
 # LOGGING
@@ -35,7 +50,7 @@ INDEX_CHUNK_BATCH = 100
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 # --------------------------------------------------
@@ -45,240 +60,454 @@ logging.basicConfig(
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-os.makedirs(VECTOR_DB_ROOT, exist_ok=True)
+SESSION_DB_DIR = os.path.join(VECTOR_DB_ROOT, st.session_state.session_id)
+
+# --------------------------------------------------
+# STEP RUNNER
+# --------------------------------------------------
 
 if "pipeline_failed" not in st.session_state:
     st.session_state.pipeline_failed = False
 
-if "chunk_tracking" not in st.session_state:
-    st.session_state.chunk_tracking = {}
 
-# --------------------------------------------------
-# HELPERS
-# --------------------------------------------------
-
-def run_step(label: str, func, *args, **kwargs):
-    """Execute func inside a Streamlit status block. Returns (ok, result)."""
+def run_step(label, func, *args, **kwargs):
     if st.session_state.pipeline_failed:
         return False, None
+
     with st.status(f"{label}...", expanded=False) as status:
-        t0 = time.time()
+        start = time.time()
         try:
             result  = func(*args, **kwargs)
-            elapsed = round(time.time() - t0, 2)
-            status.update(label=f"{label} ✓ ({elapsed}s)", state="complete", expanded=False)
-            logging.info(f"Step OK: {label} ({elapsed}s)")
+            elapsed = round(time.time() - start, 2)
+            status.update(
+                label=f"{label} successful ({elapsed}s)",
+                state="complete",
+                expanded=False,
+            )
+            logging.info(f"Step succeeded: {label} ({elapsed}s)")
             return True, result
-        except Exception as exc:
-            elapsed = round(time.time() - t0, 2)
-            st.error(str(exc))
-            status.update(label=f"{label} ✗ ({elapsed}s)", state="error", expanded=True)
+
+        except Exception as e:
+            elapsed = round(time.time() - start, 2)
+            st.error(str(e))
+            status.update(
+                label=f"{label} failed ({elapsed}s)",
+                state="error",
+                expanded=True,
+            )
             st.session_state.pipeline_failed = True
-            logging.error(f"Step FAIL: {label} — {exc}")
+            logging.error(f"Step failed: {label} - {e}")
             return False, None
 
 # --------------------------------------------------
-# CLIENTS (Cached Resource Components)
+# EMBEDDINGS
 # --------------------------------------------------
 
 @st.cache_resource
-def _embeddings() -> GoogleGenerativeAIEmbeddings:
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise EnvironmentError("GOOGLE_API_KEY environment variable is not set.")
-    return GoogleGenerativeAIEmbeddings(
-        model=GEMINI_EMBED_MODEL,
-        google_api_key=api_key,
-        output_dimensionality=768 # Match standard vector dimensional scale
+def load_embeddings():
+    base_embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
-
-@st.cache_resource
-def _llm() -> ChatGroq:
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        raise EnvironmentError("GROQ_API_KEY environment variable is not set.")
-    return ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)
-
-embeddings = _embeddings()
-llm        = _llm()
-
-# --------------------------------------------------
-# CHROMA RECTIFICATION COMPONENT
-# --------------------------------------------------
-
-@st.cache_resource
-def _init_chroma():
-    """Initializes a persistent Chroma vector instance isolated by session."""
-    persist_path = os.path.join(VECTOR_DB_ROOT, st.session_state.session_id)
-    return Chroma(
-        collection_name="rag_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_path
+    store = LocalFileStore(EMBED_CACHE_DIR)
+    cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
+        underlying_embeddings=base_embeddings,
+        document_embedding_cache=store,
+        namespace="all-MiniLM-L6-v2"
     )
-
-vector_db = _init_chroma()
+    return cached_embeddings
 
 # --------------------------------------------------
-# SIDEBAR INFO & STATISTICS
+# LLM
+# --------------------------------------------------
+
+@st.cache_resource
+def load_llm():
+    set_llm_cache(SQLiteCache(database_path="langchain_cache.db"))
+    llm = ChatGroq(
+        api_key=os.environ["GROQ_API_KEY"],
+        model="llama-3.1-8b-instant"
+    )
+    return llm
+
+
+embeddings = load_embeddings()
+llm        = load_llm()
+
+# --------------------------------------------------
+# SIDEBAR — session info + single clear button
 # --------------------------------------------------
 
 with st.sidebar:
-    st.markdown("### 📊 Session Diagnostics")
-    st.caption(f"Session ID: `{st.session_state.session_id[:8]}…`")
+    st.markdown("### Session")
+    st.caption(f"Session ID: `{st.session_state.session_id[:8]}...`")
 
     if "chunk_count" in st.session_state:
-        st.metric("Total Indexed Chunks", f"{st.session_state.chunk_count:,}")
-    
-    if st.session_state.chunk_tracking:
-        st.markdown("**PDF Index Profiles:**")
-        for filename, info in st.session_state.chunk_tracking.items():
-            st.caption(f"📄 *{filename}*")
-            st.write(f"└ Chunks: `{info['count']}` | Time: `{info['time']}s`")
+        st.caption(f"Indexed chunks: {st.session_state.chunk_count}")
 
-    if st.button("Clear Data & Reset Instance"):
-        persist_path = os.path.join(VECTOR_DB_ROOT, st.session_state.session_id)
-        if os.path.exists(persist_path):
-            import shutil
-            shutil.rmtree(persist_path)
-            st.success("Chroma vector indexes wiped.")
-        
-        for k in ["chunk_count", "chunk_tracking", "pipeline_failed"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        
-        st.cache_resource.clear()
-        gc.collect()
+    if st.button("Clear My Data"):
+        if os.path.exists(SESSION_DB_DIR):
+            shutil.rmtree(SESSION_DB_DIR)
+            logging.info(f"Cleared session DB: {SESSION_DB_DIR}")
+            st.success("Vector database deleted.")
+        else:
+            st.info("No database found to delete.")
+
+        for key in ("vector_db", "chunk_count", "metrics"):
+            st.session_state.pop(key, None)
+
+        st.session_state.pipeline_failed = False
         st.rerun()
 
 # --------------------------------------------------
-# FILE UPLOAD + VALIDATION
+# FILE UPLOAD
 # --------------------------------------------------
 
 uploaded_files = st.file_uploader(
-    "Upload PDF Files", type=["pdf"], accept_multiple_files=True
+    "Upload PDF Files",
+    type=["pdf"],
+    accept_multiple_files=True
 )
-st.caption(f"Limit: {MAX_FILES} files · {MAX_TOTAL_MB:,} MB total per session.")
+
+st.caption(f"Limit: {MAX_FILES} files, {MAX_TOTAL_MB} MB total per session.")
+
+# --------------------------------------------------
+# VALIDATE UPLOAD SIZE / COUNT
+# --------------------------------------------------
 
 upload_valid = True
+
 if uploaded_files:
     total_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+
     if len(uploaded_files) > MAX_FILES:
-        st.error(f"Too many files ({len(uploaded_files)}). Limit is {MAX_FILES}.")
+        st.error(
+            f"Too many files: {len(uploaded_files)} uploaded, "
+            f"limit is {MAX_FILES}. Please remove some files."
+        )
         upload_valid = False
+
     if total_size_mb > MAX_TOTAL_MB:
-        st.error(f"Upload too large ({total_size_mb:.1f} MB). Limit is {MAX_TOTAL_MB} MB.")
+        st.error(
+            f"Upload too large: {total_size_mb:.1f} MB, "
+            f"limit is {MAX_TOTAL_MB} MB. Please upload fewer/smaller files."
+        )
         upload_valid = False
 
-# --------------------------------------------------
-# CONSTRUCT PIPELINE EXECUTION
-# --------------------------------------------------
-
-if uploaded_files and upload_valid and st.button("Process PDFs"):
-    st.session_state.pipeline_failed = False
-    pdf_count = len(uploaded_files)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    
-    total_chunks = 0
-    tracking_metrics = {}
-
-    for uf in uploaded_files:
-        if st.session_state.pipeline_failed:
-            break
-
-        # 1. Load File to Disk Temporary Target
-        def _load(file_obj=uf):
-            tmp = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}_{file_obj.name}")
-            with open(tmp, "wb") as fh:
-                fh.write(file_obj.getbuffer())
-            try:
-                docs = PyPDFLoader(tmp).load()
-                for doc in docs:
-                    doc.metadata["source_pdf"] = file_obj.name
-                    doc.metadata["session_id"] = st.session_state.session_id
-                return docs
-            finally:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-
-        ok_load, docs = run_step(f"Parsing PDF Structure: {uf.name}", _load)
-        
-        if ok_load and docs:
-            # 2. Extract Text Segments (Chunk Size metrics tracking)
-            chunks = splitter.split_documents(docs)
-            n_chunks = len(chunks)
-            del docs
-            gc.collect()
-
-            if n_chunks == 0:
-                continue
-
-            # 3. Chroma Ingestion Execution Tracking
-            def _index(chunks_to_embed=chunks):
-                t_start = time.time()
-                for i in range(0, len(chunks_to_embed), INDEX_CHUNK_BATCH):
-                    batch = chunks_to_embed[i:i + INDEX_CHUNK_BATCH]
-                    vector_db.add_documents(batch)
-                return round(time.time() - t_start, 2)
-
-            ok_idx, execution_time = run_step(f"Chroma Processing Matrix: {uf.name}", _index)
-            
-            if ok_idx:
-                total_chunks += n_chunks
-                tracking_metrics[uf.name] = {
-                    "count": n_chunks,
-                    "time": execution_time
-                }
-            
-            del chunks
-            gc.collect()
-
-    if not st.session_state.pipeline_failed:
-        st.session_state.chunk_count = total_chunks
-        st.session_state.chunk_tracking = tracking_metrics
-        st.success(f"Ingested {pdf_count} PDFs into Chroma Vector DB!")
+    if upload_valid:
+        st.caption(
+            f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total — within limits."
+        )
 
 # --------------------------------------------------
-# RETRIEVAL INTERFACE (With Latency Verification)
+# BUILD VECTOR DB
 # --------------------------------------------------
 
-st.divider()
-st.markdown("### 🔍 Real-Time Semantic Engine Query")
-user_query = st.text_input("Ask a question about your documents:")
+if uploaded_files and upload_valid:
 
-if user_query:
-    if "chunk_count" not in st.session_state or st.session_state.chunk_count == 0:
-        st.warning("Please upload and process your PDFs before executing queries.")
-    else:
-        # Trace exact Chroma indexing query resolution latency
-        t_retrieval_start = time.time()
-        retrieved_docs = vector_db.similarity_search(user_query, k=4)
-        retrieval_latency = round(time.time() - t_retrieval_start, 4)
-        
-        # Display explicit telemetry tracking metric metrics
-        st.info(f"⏱️ **Chroma Retrieval Latency**: `{retrieval_latency} seconds` | Matches Extracted: `4 chunks`")
-        
-        # Build LLM RAG Context Payload
-        context_payload = "\n\n".join([f"[Source: {d.metadata.get('source_pdf', 'Unknown')}]: {d.page_content}" for d in retrieved_docs])
-        
-        prompt_structure = f"""You are a helpful assistant. Use the following context pieces to answer the query. If you do not know the answer, say you don't know.
+    if st.button("Process PDFs"):
+
+        experiment_start = time.time()
+        st.session_state.pipeline_failed = False
+
+        # Collect per-step wall-clock timings here
+        metrics = {}
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP
+        )
+
+        pdf_count      = len(uploaded_files)
+        dataset_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+
+        # Detect DB status BEFORE opening so we can report it accurately
+        db_already_existed = os.path.exists(SESSION_DB_DIR)
+
+        # ---- Open / create Chroma DB ----
+        def _open_vector_db():
+            return Chroma(
+                persist_directory=SESSION_DB_DIR,
+                embedding_function=embeddings
+            )
+
+        t0 = time.time()
+        ok, vector_db = run_step("Opening/ Creating Vector Database...", _open_vector_db)
+        metrics["chroma_init_time"] = round(time.time() - t0, 2)
+
+        if ok:
+
+            # ---- Phase 1: Load all PDFs ----
+            def _load_all_pdfs():
+                all_docs = []
+                for uploaded_file in uploaded_files:
+                    temp_path = os.path.join(
+                        tempfile.gettempdir(),
+                        uploaded_file.name
+                    )
+                    with open(temp_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+
+                    loader = PyPDFLoader(temp_path)
+                    docs   = loader.load()
+
+                    for doc in docs:
+                        doc.metadata["source_pdf"] = uploaded_file.name
+                        doc.metadata["session_id"] = st.session_state.session_id
+
+                    all_docs.append(docs)
+                return all_docs
+
+            t0 = time.time()
+            ok, all_docs = run_step(f"Loading {pdf_count} PDF(s)", _load_all_pdfs)
+            metrics["load_time"] = round(time.time() - t0, 2)
+
+            if ok:
+                logging.info(
+                    f"Loading phase complete: {pdf_count} file(s), "
+                    f"{sum(len(d) for d in all_docs)} pages"
+                )
+
+            # ---- Phase 2: Chunk all PDFs ----
+            if ok:
+                def _chunk_all(all_docs=all_docs):
+                    all_chunks = []
+                    for docs in all_docs:
+                        all_chunks.extend(splitter.split_documents(docs))
+                    return all_chunks
+
+                t0 = time.time()
+                ok, all_chunks = run_step(f"Chunking {pdf_count} PDF(s)", _chunk_all)
+                metrics["chunk_time"] = round(time.time() - t0, 2)
+
+                if ok:
+                    logging.info(
+                        f"Chunking phase complete: {len(all_chunks)} chunks "
+                        f"from {pdf_count} file(s)"
+                    )
+
+            # ---- Phase 3: Index all chunks ----
+            if ok:
+                def _index_all(all_chunks=all_chunks):
+                    BATCH_SIZE = 1000
+                    for i in range(0, len(all_chunks), BATCH_SIZE):
+                        batch = all_chunks[i:i + BATCH_SIZE]
+                        vector_db.add_documents(batch)
+                    return len(all_chunks)
+
+                t0 = time.time()
+                ok, total_chunks = run_step(f"Indexing {pdf_count} PDF(s)", _index_all)
+                metrics["index_time"] = round(time.time() - t0, 2)
+
+                if ok:
+                    logging.info(
+                        f"Indexing phase complete: {total_chunks} chunks indexed"
+                    )
+
+            if ok and not st.session_state.pipeline_failed:
+
+                total_time = round(time.time() - experiment_start, 2)
+
+                db_size_mb = 0
+                if os.path.exists(SESSION_DB_DIR):
+                    db_size_mb = sum(
+                        os.path.getsize(os.path.join(root, file))
+                        for root, dirs, files in os.walk(SESSION_DB_DIR)
+                        for file in files
+                    ) / (1024 * 1024)
+
+                st.session_state.vector_db   = vector_db
+                st.session_state.chunk_count = (
+                    st.session_state.get("chunk_count", 0) + total_chunks
+                )
+                st.session_state.metrics = metrics
+
+                st.success(
+                    f"Successfully indexed {total_chunks} chunks from {pdf_count} file(s)."
+                )
+
+                st.markdown("---")
+                st.subheader("Experiment Metrics")
+
+                # --- Database status ---
+                init_time = metrics.get('chroma_init_time', 0)
+                if db_already_existed:
+                    st.info(
+                        f"**Database status:** Loaded existing database — Initialization time: {init_time:.2f}s",
+                        icon="📂"
+                    )
+                else:
+                    st.success(
+                        f"**Database status:** Created new database — Initialization time: {init_time:.2f}s"
+                    )
+
+                # --- Per-step timing grid ---
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.metric(
+                        "Chroma initialization",
+                        f"{metrics.get('chroma_init_time', 0):.2f}s"
+                    )
+                    st.metric(
+                        "PDF loading",
+                        f"{metrics.get('load_time', 0):.2f}s"
+                    )
+                    st.metric(
+                        "Chunking",
+                        f"{metrics.get('chunk_time', 0):.2f}s"
+                    )
+
+                with col2:
+                    st.metric(
+                        "Indexing (embed + insert)",
+                        f"{metrics.get('index_time', 0):.2f}s"
+                    )
+                    st.metric(
+                        "Total processing time",
+                        f"{total_time:.2f}s"
+                    )
+                    st.metric(
+                        "Vector database size",
+                        f"{db_size_mb:.2f} MB"
+                    )
+
+                # --- Run summary ---
+                st.markdown("**Run summary**")
+                st.write(f"PDFs processed: **{pdf_count}**")
+                st.write(f"Dataset size: **{dataset_size_mb:.2f} MB**")
+                st.write(f"Chunk size: **{CHUNK_SIZE} characters**")
+                st.write(f"Total chunks indexed: **{total_chunks}**")
+
+# --------------------------------------------------
+# LOAD EXISTING SESSION VECTOR DB ON RERUN
+# --------------------------------------------------
+
+if (
+    "vector_db" not in st.session_state
+    and os.path.exists(SESSION_DB_DIR)
+):
+    try:
+        st.session_state.vector_db = Chroma(
+            persist_directory=SESSION_DB_DIR,
+            embedding_function=embeddings
+        )
+        logging.info(f"Loaded existing session vector DB: {SESSION_DB_DIR}")
+    except Exception as e:
+        logging.error(f"Failed to load session vector DB: {e}")
+        st.warning(f"Could not load your existing database: {e}")
+
+# --------------------------------------------------
+# QUESTION ANSWERING
+# --------------------------------------------------
+
+if "vector_db" in st.session_state:
+
+    vector_db = st.session_state.vector_db
+
+    query = st.text_input(
+        "Ask a question",
+        placeholder="Ask something about the uploaded PDFs..."
+    )
+
+    if st.button("Get Answer") and query:
+
+        st.session_state.pipeline_failed = False
+        logging.info(f"Query: {query}")
+
+        # ---- Step 1: Retrieve chunks ----
+        chroma_retrieval_time_container = [0.0]
+        def _retrieve():
+            t_start = time.time()
+            res = vector_db.similarity_search_with_relevance_scores(
+                query,
+                k=8
+            )
+            chroma_retrieval_time_container[0] = round(time.time() - t_start, 4)
+            return res
+
+        t0 = time.time()
+        ok, raw_results = run_step("Searching Documents", _retrieve)
+        retrieval_time = round(time.time() - t0, 4)
+
+        # ---- Step 2: Build context ----
+        def _build_context():
+            context = ""
+            sources = set()
+
+            for doc, score in raw_results:
+                source = doc.metadata.get("source_pdf", "Unknown")
+                sources.add(source)
+                context += f"""
+
+SOURCE: {source}
+
+{doc.page_content}
+
+"""
+            return context, sources
+
+        ok, ctx_result = run_step("Building Context", _build_context)
+
+        if ok:
+            context, sources = ctx_result
+
+            prompt = f"""
+You are a document question-answering assistant.
+
+Answer ONLY using the provided context.
+
+If the answer is not present in the context, say:
+
+"Information not found in retrieved documents."
 
 Context:
-{context_payload}
+{context}
 
-User Query: {user_query}
-Answer:"""
+Question:
+{query}
+"""
 
-        with st.spinner("Generating LLM Response..."):
-            try:
-                response = llm.invoke(prompt_structure)
-                st.markdown("####System Response:")
-                st.write(response.content)
-                
-                # Context expansion view layout
-                with st.expander("Inspect Retrieved Source Chunks"):
-                    for idx, doc in enumerate(retrieved_docs):
-                        st.markdown(f"**Chunk {idx+1}** - *Source File: {doc.metadata.get('source_pdf')}*")
-                        st.caption(doc.page_content)
+            # ---- Step 3: Generate answer ----
+            def _generate_answer():
+                response = llm.invoke(prompt)
+                return response.content
+
+            ok, answer = run_step("Generating Answer", _generate_answer)
+
+            if ok:
+                logging.info("Answer generated successfully")
+
+                st.markdown("## Answer")
+                st.write(answer)
+
+                # --- Retrieval Metrics ---
+                st.markdown("### Retrieval Metrics")
+                col_m1, col_m2, col_m3 = st.columns(3)
+                with col_m1:
+                    st.metric("Chroma Retrieval Time", f"{chroma_retrieval_time_container[0]:.4f}s")
+                with col_m2:
+                    st.metric("Overall Retrieval Time", f"{retrieval_time:.4f}s")
+                with col_m3:
+                    st.metric("Configured Chunk Size", f"{CHUNK_SIZE} chars")
+
+                st.markdown("## Source PDFs")
+                for source in sources:
+                    st.write(f"- {source}")
+
+                with st.expander("Retrieved Chunks"):
+                    for idx, (doc, score) in enumerate(raw_results):
+                        st.markdown(f"### Chunk {idx+1}")
+                        st.write(f"Source: {doc.metadata.get('source_pdf')}")
+                        st.write(f"Score: {score:.4f}")
+                        st.write(f"Chunk Size (Actual): {len(doc.page_content)} characters")
+                        st.text(doc.page_content[:500])
                         st.divider()
-            except Exception as e:
-                st.error(f"LLM Engine inference execution failed: {e}")
+
+        if st.session_state.pipeline_failed:
+            st.error("Answer generation stopped due to the failed step above.")
+
+else:
+
+    st.info(
+        "Upload PDFs and click Process PDFs."
+    )
