@@ -271,3 +271,14 @@ Answer:"""
         with st.spinner("Generating LLM Response..."):
             try:
                 response = llm.invoke(prompt_structure)
+                st.markdown("####System Response:")
+                st.write(response.content)
+                
+                # Context expansion view layout
+                with st.expander("Inspect Retrieved Source Chunks"):
+                    for idx, doc in enumerate(retrieved_docs):
+                        st.markdown(f"**Chunk {idx+1}** - *Source File: {doc.metadata.get('source_pdf')}*")
+                        st.caption(doc.page_content)
+                        st.divider()
+            except Exception as e:
+                st.error(f"LLM Engine inference execution failed: {e}")
