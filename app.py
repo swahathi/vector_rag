@@ -4,12 +4,12 @@ import tempfile
 import time
 import uuid
 import logging
-import gc  # Added for strict memory management
+import gc  # Used for strict memory management
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_milvus import Milvus
+from langchain_chroma import Chroma  # Switched from Milvus to Chroma
 from langchain_groq import ChatGroq
 
 # --------------------------------------------------
@@ -17,21 +17,16 @@ from langchain_groq import ChatGroq
 # --------------------------------------------------
 
 st.set_page_config(page_title="Multi PDF RAG System", layout="wide")
-st.title("Multi-PDF Semantic RAG System")
+st.title("Multi-PDF Semantic RAG System (Chroma Edition)")
 
-VECTOR_DB_ROOT    = "./vector_db"
+VECTOR_DB_ROOT    = "./chroma_db"
 LOG_FILE          = "./rag.log"
-MAX_FILES         = 50        # Reduced from 1600 to fit within 1GB RAM constraint
-MAX_TOTAL_MB      = 200       # Reduced from 10GB to protect container memory
-MILVUS_COLLECTION = "rag_docs"
+MAX_FILES         = 50        
+MAX_TOTAL_MB      = 200       
 
-<<<<<<< HEAD
-# FIX: Switched from broken text-embedding-004 to active gemini-embedding-001
-=======
->>>>>>> 8af7fd27396c003ca3cc28e888104704f980f2cd
+# Active, supported embedding endpoint
 GEMINI_EMBED_MODEL = "models/gemini-embedding-001"
-
-INDEX_CHUNK_BATCH = 100       # Reduced from 500 to lower memory spikes
+INDEX_CHUNK_BATCH = 100       
 
 # --------------------------------------------------
 # LOGGING
@@ -51,15 +46,16 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
 os.makedirs(VECTOR_DB_ROOT, exist_ok=True)
-SESSION_DB_PATH = os.path.join(VECTOR_DB_ROOT, f"{st.session_state.session_id}.db")
-
-# --------------------------------------------------
-# PIPELINE STATE
-# --------------------------------------------------
 
 if "pipeline_failed" not in st.session_state:
     st.session_state.pipeline_failed = False
 
+if "chunk_tracking" not in st.session_state:
+    st.session_state.chunk_tracking = {}
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 
 def run_step(label: str, func, *args, **kwargs):
     """Execute func inside a Streamlit status block. Returns (ok, result)."""
@@ -81,9 +77,8 @@ def run_step(label: str, func, *args, **kwargs):
             logging.error(f"Step FAIL: {label} — {exc}")
             return False, None
 
-
 # --------------------------------------------------
-# CLIENTS
+# CLIENTS (Cached Resource Components)
 # --------------------------------------------------
 
 @st.cache_resource
@@ -94,10 +89,8 @@ def _embeddings() -> GoogleGenerativeAIEmbeddings:
     return GoogleGenerativeAIEmbeddings(
         model=GEMINI_EMBED_MODEL,
         google_api_key=api_key,
-        # FIX: Force the 3072 output to 768 dimensions to optimize Milvus Lite footprint
-        output_dimensionality=768
+        output_dimensionality=768 # Match standard vector dimensional scale
     )
-
 
 @st.cache_resource
 def _llm() -> ChatGroq:
@@ -106,50 +99,55 @@ def _llm() -> ChatGroq:
         raise EnvironmentError("GROQ_API_KEY environment variable is not set.")
     return ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)
 
-
 embeddings = _embeddings()
 llm        = _llm()
 
-
 # --------------------------------------------------
-# MILVUS HELPERS
+# CHROMA RECTIFICATION COMPONENT
 # --------------------------------------------------
 
-def _open_milvus(db_path: str) -> Milvus:
-    return Milvus(
+@st.cache_resource
+def _init_chroma():
+    """Initializes a persistent Chroma vector instance isolated by session."""
+    persist_path = os.path.join(VECTOR_DB_ROOT, st.session_state.session_id)
+    return Chroma(
+        collection_name="rag_collection",
         embedding_function=embeddings,
-        collection_name=MILVUS_COLLECTION,
-        connection_args={"uri": db_path},
-        auto_id=True,
-        drop_old=False,
+        persist_directory=persist_path
     )
 
+vector_db = _init_chroma()
 
 # --------------------------------------------------
-# SIDEBAR
+# SIDEBAR INFO & STATISTICS
 # --------------------------------------------------
 
 with st.sidebar:
-    st.markdown("### Session")
+    st.markdown("### 📊 Session Diagnostics")
     st.caption(f"Session ID: `{st.session_state.session_id[:8]}…`")
 
     if "chunk_count" in st.session_state:
-        st.caption(f"Indexed chunks: {st.session_state.chunk_count:,}")
+        st.metric("Total Indexed Chunks", f"{st.session_state.chunk_count:,}")
+    
+    if st.session_state.chunk_tracking:
+        st.markdown("**PDF Index Profiles:**")
+        for filename, info in st.session_state.chunk_tracking.items():
+            st.caption(f"📄 *{filename}*")
+            st.write(f"└ Chunks: `{info['count']}` | Time: `{info['time']}s`")
 
-    if st.button("Clear My Data"):
-        if os.path.exists(SESSION_DB_PATH):
-            try:
-                os.remove(SESSION_DB_PATH)
-                logging.info(f"Deleted session DB: {SESSION_DB_PATH}")
-                st.success("Vector database deleted.")
-            except Exception as e:
-                st.error(f"Could not delete database: {e}")
-        else:
-            st.info("No database found to delete.")
-        for k in ("vector_db", "chunk_count", "metrics"):
-            st.session_state.pop(k, None)
-        st.session_state.pipeline_failed = False
-        gc.collect()  # Flush RAM immediately
+    if st.button("Clear Data & Reset Instance"):
+        persist_path = os.path.join(VECTOR_DB_ROOT, st.session_state.session_id)
+        if os.path.exists(persist_path):
+            import shutil
+            shutil.rmtree(persist_path)
+            st.success("Chroma vector indexes wiped.")
+        
+        for k in ["chunk_count", "chunk_tracking", "pipeline_failed"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        
+        st.cache_resource.clear()
+        gc.collect()
         st.rerun()
 
 # --------------------------------------------------
@@ -170,203 +168,106 @@ if uploaded_files:
     if total_size_mb > MAX_TOTAL_MB:
         st.error(f"Upload too large ({total_size_mb:.1f} MB). Limit is {MAX_TOTAL_MB} MB.")
         upload_valid = False
-    if upload_valid:
-        st.caption(f"{len(uploaded_files)} file(s) · {total_size_mb:.1f} MB — within limits.")
 
 # --------------------------------------------------
-# BUILD VECTOR DB
+# CONSTRUCT PIPELINE EXECUTION
 # --------------------------------------------------
 
 if uploaded_files and upload_valid and st.button("Process PDFs"):
-
-    pipeline_start = time.time()
     st.session_state.pipeline_failed = False
+    pdf_count = len(uploaded_files)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    
+    total_chunks = 0
+    tracking_metrics = {}
 
-    pdf_count       = len(uploaded_files)
-    dataset_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
-    db_existed      = os.path.exists(SESSION_DB_PATH)
-    metrics: dict   = {}
-    splitter        = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-
-    t0 = time.time()
-    ok, vector_db = run_step("Opening / Creating Vector Database", _open_milvus, SESSION_DB_PATH)
-    metrics["milvus_init_time"] = round(time.time() - t0, 2)
-
-    if ok:
-        total_chunks  = 0
-        
-        for uf in uploaded_files:
-            if st.session_state.pipeline_failed:
-                break
-
-            def _load(uf=uf):
-                tmp_dir = tempfile.gettempdir()
-                tmp = os.path.join(tmp_dir, f"{uuid.uuid4()}_{uf.name}")
-                with open(tmp, "wb") as fh:
-                    fh.write(uf.getbuffer())
-                
-                try:
-                    docs = PyPDFLoader(tmp).load()
-                    for doc in docs:
-                        doc.metadata["source_pdf"] = uf.name
-                        doc.metadata["session_id"] = st.session_state.session_id
-                    return docs
-                finally:
-                    # FIX: Safely remove the temporary file to keep disk space low
-                    if os.path.exists(tmp):
-                        os.remove(tmp)
-
-            t0 = time.time()
-            ok_load, docs = run_step(f"Loading: {uf.name}", _load)
-            
-            if ok_load and docs:
-                # Chunk and immediately commit to Milvus
-                chunks = splitter.split_documents(docs)
-                total_chunks += len(chunks)
-                
-                # Batch upload chunks to limit memory spike
-                for i in range(0, len(chunks), INDEX_CHUNK_BATCH):
-                    batch = chunks[i:i + INDEX_CHUNK_BATCH]
-                    vector_db.add_documents(batch)
-                
-                # FIX: Force Python to completely drop the data references from RAM
-                del docs
-                del chunks
-                gc.collect()
-
-<<<<<<< HEAD
-        st.session_state.chunk_count = total_chunks
-        st.success(f"Successfully processed {pdf_count} files ({total_chunks} chunks)!")
-=======
-            t0 = time.time()
-            ok, n = run_step(f"Indexing:  {uf.name}", _index)
-            index_elapsed += time.time() - t0
-            del chunks        # chunks freed before next PDF
-            if not ok:
-                break
-
-            total_chunks += n
-            logging.info(f"'{uf.name}': {n} chunks indexed.")
-
-        metrics["load_time"]  = round(load_elapsed,  2)
-        metrics["chunk_time"] = round(chunk_elapsed, 2)
-        metrics["index_time"] = round(index_elapsed, 2)
-
-        if not st.session_state.pipeline_failed:
-            total_time = round(time.time() - pipeline_start, 2)
-            db_size_mb = os.path.getsize(SESSION_DB_PATH) / (1024 * 1024) if os.path.exists(SESSION_DB_PATH) else 0.0
-
-            st.session_state.vector_db   = vector_db
-            st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + total_chunks
-            st.session_state.metrics     = metrics
-
-            logging.info(f"Pipeline done: {total_chunks} chunks / {pdf_count} PDFs / {total_time}s")
-            st.success(f"Indexed {total_chunks:,} chunks from {pdf_count} file(s).")
-
-            # ── Metrics dashboard ─────────────────────────────────────────────
-            st.markdown("---")
-            st.subheader("Experiment Metrics")
-
-            init_t = metrics["milvus_init_time"]
-            if db_existed:
-                st.info(f"**Database status:** Loaded existing database — init: {init_t:.2f}s")
-            else:
-                st.success(f"**Database status:** Created new database — init: {init_t:.2f}s")
-
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("Milvus initialization",    f"{metrics['milvus_init_time']:.2f}s")
-                st.metric("PDF loading",              f"{metrics['load_time']:.2f}s")
-                st.metric("Chunking",                 f"{metrics['chunk_time']:.2f}s")
-            with c2:
-                st.metric("Indexing (embed + insert)", f"{metrics['index_time']:.2f}s")
-                st.metric("Total processing time",     f"{total_time:.2f}s")
-                st.metric("Vector database size",      f"{db_size_mb:.2f} MB")
-
-            st.markdown("**Run summary**")
-            st.write(f"PDFs processed: **{pdf_count}**")
-            st.write(f"Dataset size: **{dataset_size_mb:.2f} MB**")
-            st.write(f"Total chunks indexed: **{total_chunks:,}**")
-
-# --------------------------------------------------
-# RECONNECT TO EXISTING SESSION DB ON RERUN
-# --------------------------------------------------
-
-if "vector_db" not in st.session_state and os.path.exists(SESSION_DB_PATH):
-    try:
-        st.session_state.vector_db = _open_milvus(SESSION_DB_PATH)
-        logging.info(f"Reconnected to existing session DB: {SESSION_DB_PATH}")
-    except Exception as exc:
-        logging.error(f"Failed to reconnect to session DB: {exc}")
-        st.warning(f"Could not load your existing database: {exc}")
-
-# --------------------------------------------------
-# QUESTION ANSWERING
-# --------------------------------------------------
-
-if "vector_db" in st.session_state:
-    vector_db = st.session_state.vector_db
-    query     = st.text_input("Ask a question", placeholder="Ask something about the uploaded PDFs…")
-
-    if st.button("Get Answer") and query:
-        st.session_state.pipeline_failed = False
-        logging.info(f"Query received: {query}")
-
-        # Retrieve ─────────────────────────────────────────────────────────────
-        # similarity_search_with_relevance_scores encodes `query` via
-        # embed_query() which automatically uses RETRIEVAL_QUERY task type.
-        def _retrieve():
-            return vector_db.similarity_search_with_relevance_scores(query, k=8)
-
-        ok, raw_results = run_step("Searching Documents", _retrieve)
-
-        # Build context ────────────────────────────────────────────────────────
-        if ok:
-            def _build_context():
-                ctx_parts, sources = [], set()
-                for doc, _ in raw_results:
-                    src = doc.metadata.get("source_pdf", "Unknown")
-                    sources.add(src)
-                    ctx_parts.append(f"SOURCE: {src}\n\n{doc.page_content}")
-                return "\n\n---\n\n".join(ctx_parts), sources
-
-            ok, (context, sources) = run_step("Building Context", _build_context)
-
-        # Generate answer ──────────────────────────────────────────────────────
-        if ok:
-            prompt = (
-                "You are a document question-answering assistant.\n"
-                "Answer ONLY using the provided context.\n"
-                "If the answer is not present, say: "
-                '"Information not found in retrieved documents."\n\n'
-                f"Context:\n{context}\n\nQuestion:\n{query}"
-            )
-
-            def _answer():
-                return llm.invoke(prompt).content
-
-            ok, answer = run_step("Generating Answer", _answer)
-
-            if ok:
-                logging.info("Answer generated successfully.")
-                st.markdown("## Answer")
-                st.write(answer)
-
-                st.markdown("## Source PDFs")
-                for src in sorted(sources):
-                    st.write(f"- {src}")
-
-                with st.expander("Retrieved Chunks"):
-                    for idx, (doc, score) in enumerate(raw_results, 1):
-                        st.markdown(f"### Chunk {idx}")
-                        st.write(f"**Source:** {doc.metadata.get('source_pdf')}")
-                        st.write(f"**Score:** {score:.4f}")
-                        st.text(doc.page_content[:500])
-                        st.divider()
-
+    for uf in uploaded_files:
         if st.session_state.pipeline_failed:
-            st.error("Pipeline stopped due to the failed step above.")
+            break
 
-else:
-    st.info("Upload PDFs and click **Process PDFs** to begin.")
->>>>>>> 8af7fd27396c003ca3cc28e888104704f980f2cd
+        # 1. Load File to Disk Temporary Target
+        def _load(file_obj=uf):
+            tmp = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}_{file_obj.name}")
+            with open(tmp, "wb") as fh:
+                fh.write(file_obj.getbuffer())
+            try:
+                docs = PyPDFLoader(tmp).load()
+                for doc in docs:
+                    doc.metadata["source_pdf"] = file_obj.name
+                    doc.metadata["session_id"] = st.session_state.session_id
+                return docs
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+
+        ok_load, docs = run_step(f"Parsing PDF Structure: {uf.name}", _load)
+        
+        if ok_load and docs:
+            # 2. Extract Text Segments (Chunk Size metrics tracking)
+            chunks = splitter.split_documents(docs)
+            n_chunks = len(chunks)
+            del docs
+            gc.collect()
+
+            if n_chunks == 0:
+                continue
+
+            # 3. Chroma Ingestion Execution Tracking
+            def _index(chunks_to_embed=chunks):
+                t_start = time.time()
+                for i in range(0, len(chunks_to_embed), INDEX_CHUNK_BATCH):
+                    batch = chunks_to_embed[i:i + INDEX_CHUNK_BATCH]
+                    vector_db.add_documents(batch)
+                return round(time.time() - t_start, 2)
+
+            ok_idx, execution_time = run_step(f"Chroma Processing Matrix: {uf.name}", _index)
+            
+            if ok_idx:
+                total_chunks += n_chunks
+                tracking_metrics[uf.name] = {
+                    "count": n_chunks,
+                    "time": execution_time
+                }
+            
+            del chunks
+            gc.collect()
+
+    if not st.session_state.pipeline_failed:
+        st.session_state.chunk_count = total_chunks
+        st.session_state.chunk_tracking = tracking_metrics
+        st.success(f"Ingested {pdf_count} PDFs into Chroma Vector DB!")
+
+# --------------------------------------------------
+# RETRIEVAL INTERFACE (With Latency Verification)
+# --------------------------------------------------
+
+st.divider()
+st.markdown("### 🔍 Real-Time Semantic Engine Query")
+user_query = st.text_input("Ask a question about your documents:")
+
+if user_query:
+    if "chunk_count" not in st.session_state or st.session_state.chunk_count == 0:
+        st.warning("Please upload and process your PDFs before executing queries.")
+    else:
+        # Trace exact Chroma indexing query resolution latency
+        t_retrieval_start = time.time()
+        retrieved_docs = vector_db.similarity_search(user_query, k=4)
+        retrieval_latency = round(time.time() - t_retrieval_start, 4)
+        
+        # Display explicit telemetry tracking metric metrics
+        st.info(f"⏱️ **Chroma Retrieval Latency**: `{retrieval_latency} seconds` | Matches Extracted: `4 chunks`")
+        
+        # Build LLM RAG Context Payload
+        context_payload = "\n\n".join([f"[Source: {d.metadata.get('source_pdf', 'Unknown')}]: {d.page_content}" for d in retrieved_docs])
+        
+        prompt_structure = f"""You are a helpful assistant. Use the following context pieces to answer the query. If you do not know the answer, say you don't know.
+
+Context:
+{context_payload}
+
+User Query: {user_query}
+Answer:"""
+
+        with st.spinner("Generating LLM Response..."):
+            try:
+                response = llm.invoke(prompt_structure)
