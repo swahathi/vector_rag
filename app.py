@@ -28,9 +28,10 @@ st.title(CONFIG.app_title)
 
 configure_logging(CONFIG.log_file)
 
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
 
+if "session_id" not in st.session_state:
+    st.session_state.session_id = "current_session"
+    
 if "pipeline_failed" not in st.session_state:
     st.session_state.pipeline_failed = False
 
