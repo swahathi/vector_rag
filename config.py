@@ -16,10 +16,10 @@ class AppConfig:
 
     max_files: int = 1600
     max_total_mb: int = 10000
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
+    chunk_size: int = 700
+    chunk_overlap: int = 150
     chunk_batch_size: int = 1000
-    retrieval_k: int = 15
+    retrieval_k: int = 20
 
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_namespace: str = "all-MiniLM-L6-v2"
