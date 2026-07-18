@@ -5,6 +5,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any
+import time
 
 from langchain_community.vectorstores import Chroma
 
@@ -28,10 +29,19 @@ def open_vector_db(session_id: str, embeddings) -> Chroma:
     )
 
 
-def clear_session_db(session_id: str) -> None:
+def clear_session_db(session_id: str, retries: int = 5, delay: float = 0.3) -> None:
     session_dir = get_session_db_dir(session_id)
-    if session_dir.exists():
-        shutil.rmtree(session_dir)
+    if not session_dir.exists():
+        return
+
+    for attempt in range(retries):
+        try:
+            shutil.rmtree(session_dir)
+            return
+        except PermissionError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
 
 
 def get_db_size_mb(session_id: str) -> float:
@@ -63,4 +73,7 @@ def save_manifest(session_id: str, manifest: dict[str, Any]) -> None:
 
 
 def vector_db_exists(session_id: str) -> bool:
-    return get_session_db_dir(session_id).exists()
+    session_dir.get_session_db_dir(session_id)
+    if not session_dir.exist():
+        return False
+    sqlite_file=session_dir/"chroma.sqlite3"
