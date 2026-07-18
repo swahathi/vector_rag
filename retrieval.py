@@ -21,7 +21,12 @@ def build_context(raw_results):
         source = doc.metadata.get("source_pdf", "Unknown")
         sources.add(source)
         context_parts.append(
-            f"SOURCE: {source}\n\n{doc.page_content}"
+            f"""
+        SOURCE: {source}
+        PAGE: {doc.metadata.get("page")}
+        CHUNK: {doc.metadata.get("chunk_id")}
+        {doc.page_content}
+        """
         )
     return "\n\n".join(context_parts), sources
 
