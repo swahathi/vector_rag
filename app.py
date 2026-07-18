@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 import time
@@ -75,10 +76,19 @@ with st.sidebar:
     st.caption(f"Indexed PDFs in session: {len(indexed_files)}")
 
     if st.button("Clear My Data"):
-        clear_session_db(st.session_state.session_id)
-        logging.info("Cleared session DB for %s", st.session_state.session_id)
+        # Drop every reference to the Chroma client (and anything else tied
+        # to this session's DB) *before* deleting its files. On Windows,
+        # Chroma's persistent index (data_level0.bin) is memory-mapped, and
+        # the OS refuses to unlink a file that's still open/mapped anywhere
+        # in the process. Deleting first and popping session_state after
+        # (the previous order) meant the client was still alive when
+        # shutil.rmtree ran, causing PermissionError: [WinError 32].
         for key in ("vector_db", "chunk_count", "metrics", "last_ingestion_summary"):
             st.session_state.pop(key, None)
+        gc.collect()
+
+        clear_session_db(st.session_state.session_id)
+        logging.info("Cleared session DB for %s", st.session_state.session_id)
         st.session_state.pipeline_failed = False
         st.success("Vector database deleted.")
         st.rerun()
@@ -207,11 +217,22 @@ if uploaded_files and upload_valid and st.button("Process PDFs"):
 
 if "vector_db" not in st.session_state and vector_db_exists(st.session_state.session_id):
     try:
-        st.session_state.vector_db = open_vector_db(st.session_state.session_id, embeddings)
-        logging.info("Loaded existing session vector DB: %s", st.session_state.session_id)
+        st.session_state.vector_db = open_vector_db(
+            st.session_state.session_id,
+            embeddings,
+        )
+
     except Exception as exc:
-        logging.exception("Failed to load session vector DB")
-        st.warning(f"Could not load your existing database: {exc}")
+        logging.exception("Database corrupted. Creating new database.")
+
+        clear_session_db(st.session_state.session_id)
+
+        st.session_state.vector_db = open_vector_db(
+            st.session_state.session_id,
+            embeddings,
+        )
+
+        st.info("Previous database was corrupted and has been recreated.")
 
 
 if "vector_db" in st.session_state:
