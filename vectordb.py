@@ -73,7 +73,8 @@ def save_manifest(session_id: str, manifest: dict[str, Any]) -> None:
 
 
 def vector_db_exists(session_id: str) -> bool:
-    session_dir.get_session_db_dir(session_id)
-    if not session_dir.exist():
+    session_dir=get_session_db_dir(session_id)
+    if not session_dir.exists():
         return False
     sqlite_file=session_dir/"chroma.sqlite3"
+    return sqlite_file.exists()

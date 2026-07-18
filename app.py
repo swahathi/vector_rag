@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 import time
-import uuid
+
 
 import streamlit as st
 
@@ -31,7 +31,7 @@ configure_logging(CONFIG.log_file)
 
 if "session_id" not in st.session_state:
     st.session_state.session_id = "current_session"
-    
+
 if "pipeline_failed" not in st.session_state:
     st.session_state.pipeline_failed = False
 
@@ -77,22 +77,36 @@ with st.sidebar:
     st.caption(f"Indexed PDFs in session: {len(indexed_files)}")
 
     if st.button("Clear My Data"):
-        # Drop every reference to the Chroma client (and anything else tied
-        # to this session's DB) *before* deleting its files. On Windows,
-        # Chroma's persistent index (data_level0.bin) is memory-mapped, and
-        # the OS refuses to unlink a file that's still open/mapped anywhere
-        # in the process. Deleting first and popping session_state after
-        # (the previous order) meant the client was still alive when
-        # shutil.rmtree ran, causing PermissionError: [WinError 32].
-        for key in ("vector_db", "chunk_count", "metrics", "last_ingestion_summary"):
-            st.session_state.pop(key, None)
-        gc.collect()
 
-        clear_session_db(st.session_state.session_id)
-        logging.info("Cleared session DB for %s", st.session_state.session_id)
-        st.session_state.pipeline_failed = False
-        st.success("Vector database deleted.")
-        st.rerun()
+    # Release the Chroma database object
+        vector_db = st.session_state.pop("vector_db", None)
+
+        if vector_db is not None:
+            del vector_db
+
+    # Remove remaining session variables
+        for key in (
+         "chunk_count",
+         "metrics",
+         "last_ingestion_summary",
+    ):
+            st.session_state.pop(key, None)
+
+        gc.collect()
+        time.sleep(1)
+
+        try:
+            clear_session_db(st.session_state.session_id)
+
+            st.session_state.pipeline_failed = False
+            st.success("Vector database deleted.")
+            st.rerun()
+
+        except PermissionError:
+            st.error(
+                "The database is still being used. Please wait a moment and try again."
+        )
+            logging.exception("Failed to delete vector database.")
 
 
 uploaded_files = st.file_uploader(
@@ -223,17 +237,21 @@ if "vector_db" not in st.session_state and vector_db_exists(st.session_state.ses
             embeddings,
         )
 
-    except Exception as exc:
+    except Exception:
         logging.exception("Database corrupted. Creating new database.")
 
         clear_session_db(st.session_state.session_id)
 
-        st.session_state.vector_db = open_vector_db(
-            st.session_state.session_id,
-            embeddings,
-        )
+        try:
+            st.session_state.vector_db = open_vector_db(
+                st.session_state.session_id,
+                embeddings,
+            )
+            st.info("Previous database was corrupted and has been recreated.")
 
-        st.info("Previous database was corrupted and has been recreated.")
+        except Exception:
+            st.error("Unable to create a new vector database.")
+            logging.exception("Failed to recreate vector database.")
 
 
 if "vector_db" in st.session_state:
@@ -245,8 +263,11 @@ if "vector_db" in st.session_state:
 
     if st.button("Get Answer") and query:
         st.session_state.pipeline_failed = False
-        logging.info("Query: %s", query)
-
+        logging.info(
+            "User Query | %s | %s",
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            query,
+            )
         ok, retrieval_result = run_step(
             "Searching Documents",
             retrieve_documents,
@@ -276,15 +297,18 @@ if "vector_db" in st.session_state:
                         st.metric("Configured Chunk Size", f"{CONFIG.chunk_size} chars")
 
                     st.markdown("## Source PDFs")
-                    for source in sources:
+                    for source in sorted(set(sources)):
                         st.write(f"- {source}")
 
                     with st.expander("Retrieved Chunks"):
                         for index, (doc, score) in enumerate(raw_results, start=1):
                             st.markdown(f"### Chunk {index}")
                             st.write(f"Source: {doc.metadata.get('source_pdf')}")
+                            st.write(f"Page: {doc.metadata.get('page')}")
+                            st.write(f"Chunk ID: {doc.metadata.get('chunk_id')}")
+                            st.write(f"Chunk Index: {doc.metadata.get('chunk_index')}")
                             st.write(f"Score: {score:.4f}")
-                            st.write(f"Chunk Size (Actual): {len(doc.page_content)} characters")
+                            st.write(f"Characters: {doc.metadata.get('char_count')}")
                             st.text(doc.page_content[:500])
                             st.divider()
         if st.session_state.pipeline_failed:

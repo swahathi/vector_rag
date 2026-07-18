@@ -44,12 +44,18 @@ Rules:
 - Do NOT fabricate any information.
 - Do NOT complete or generate partial values.
 - Never invent hashes, hexadecimal values, CVEs, registry keys, IP addresses, file paths, URLs, filenames, or technical identifiers.
-- If the requested information is not explicitly present in the retrieved context, reply exactly:
+If the answer can be directly determined from the retrieved context,
+answer it.
+
+Only reply
 
 Information not found in retrieved documents.
 
-- If multiple retrieved chunks contain conflicting information, only report what is explicitly stated in the retrieved context and do not attempt to resolve the conflict.
+when the retrieved context truly does not contain the answer.
 
+- If multiple retrieved chunks contain conflicting information, only report what is explicitly stated in the retrieved context and do not attempt to resolve the conflict.
+If the retrieved context contains information from multiple documents,
+combine the information from all relevant documents before answering.
 Retrieved Context:
 {context}
 

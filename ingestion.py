@@ -104,6 +104,26 @@ def ingest_uploaded_files(
 
             chunk_start = time.time()
             chunks = splitter.split_documents(docs)
+
+            if not chunks:
+                metrics.empty_documents+=1
+                summary.file_results.append(
+                    FileIngestionResult(uploaded_file.name,"empty")
+                )
+                logging.warning("PDF produced no chunks: %s",uploaded_file.name)
+                continue
+            total_chunks=len(chunks)
+            for idx, chunk in enumerate(chunks):
+                chunk.metadata.update({
+                    "filename": uploaded_file.name,
+                    "session_id": session_id,
+                    "file_fingerprint": fingerprint,
+                    "chunk_id": f"{fingerprint}_{idx}",
+                    "chunk_index": idx,
+                    "total_chunks": total_chunks,
+                    "page": chunk.metadata.get("page", -1),
+                    "char_count": len(chunk.page_content),
+    })
             metrics.chunk_time += time.time() - chunk_start
 
             if not chunks:
