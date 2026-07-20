@@ -1,9 +1,6 @@
-import gc
 import logging
-import os
 import time
-
-
+import os as os
 import streamlit as st
 
 from chunking import build_text_splitter
@@ -18,22 +15,20 @@ from vectordb import (
     clear_session_db,
     get_db_size_mb,
     load_manifest,
-    open_vector_db,
     vector_db_exists,
+    vector_db_session,
 )
-
 
 st.set_page_config(page_title=CONFIG.page_title, layout=CONFIG.page_layout)
 st.title(CONFIG.app_title)
-
 configure_logging(CONFIG.log_file)
-
 
 if "session_id" not in st.session_state:
     st.session_state.session_id = "current_session"
-
 if "pipeline_failed" not in st.session_state:
     st.session_state.pipeline_failed = False
+
+SESSION_ID = st.session_state.session_id
 
 
 def run_step(label, func, *args, **kwargs):
@@ -42,21 +37,13 @@ def run_step(label, func, *args, **kwargs):
         try:
             result = func(*args, **kwargs)
             elapsed = round(time.time() - start, 2)
-            status.update(
-                label=f"{label} successful ({elapsed}s)",
-                state="complete",
-                expanded=False,
-            )
+            status.update(label=f"{label} successful ({elapsed}s)", state="complete")
             logging.info("Step succeeded: %s (%.2fs)", label, elapsed)
             return True, result
         except Exception as exc:
             elapsed = round(time.time() - start, 2)
             st.error(str(exc))
-            status.update(
-                label=f"{label} failed ({elapsed}s)",
-                state="error",
-                expanded=True,
-            )
+            status.update(label=f"{label} failed ({elapsed}s)", state="error", expanded=True)
             st.session_state.pipeline_failed = True
             logging.exception("Step failed: %s", label)
             return False, None
@@ -67,74 +54,39 @@ llm = load_llm()
 
 with st.sidebar:
     st.markdown("### Session")
-    st.caption(f"Session ID: `{st.session_state.session_id[:8]}...`")
-
+    st.caption(f"Session ID: `{SESSION_ID[:8]}...`")
     if "chunk_count" in st.session_state:
         st.caption(f"Indexed chunks: {st.session_state.chunk_count}")
 
-    manifest = load_manifest(st.session_state.session_id)
-    indexed_files = manifest.get("indexed_files", {})
-    st.caption(f"Indexed PDFs in session: {len(indexed_files)}")
+    manifest = load_manifest(SESSION_ID)
+    st.caption(f"Indexed PDFs in session: {len(manifest.get('indexed_files', {}))}")
 
     if st.button("Clear My Data"):
-
-    # Release the Chroma database object
-        vector_db = st.session_state.pop("vector_db", None)
-
-        if vector_db is not None:
-            del vector_db
-
-    # Remove remaining session variables
-        for key in (
-         "chunk_count",
-         "metrics",
-         "last_ingestion_summary",
-    ):
+        for key in ("chunk_count", "metrics", "last_ingestion_summary"):
             st.session_state.pop(key, None)
-
-        gc.collect()
-        time.sleep(1)
-
         try:
-            clear_session_db(st.session_state.session_id)
-
+            clear_session_db(SESSION_ID)
             st.session_state.pipeline_failed = False
-            st.success("Vector database deleted.")
+            st.success("Vector database deleted successfully.")
             st.rerun()
-
-        except PermissionError:
-            st.error(
-                "The database is still being used. Please wait a moment and try again."
-        )
-            logging.exception("Failed to delete vector database.")
+        except PermissionError as exc:
+            st.error(str(exc))
 
 
-uploaded_files = st.file_uploader(
-    "Upload PDF Files",
-    type=["pdf"],
-    accept_multiple_files=True,
-)
+uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
 st.caption(f"Limit: {CONFIG.max_files} files, {CONFIG.max_total_mb} MB total per session.")
 
 upload_valid = True
 if uploaded_files:
     total_size_mb = sum(file.size for file in uploaded_files) / (1024 * 1024)
     if len(uploaded_files) > CONFIG.max_files:
-        st.error(
-            f"Too many files: {len(uploaded_files)} uploaded, "
-            f"limit is {CONFIG.max_files}. Please remove some files."
-        )
+        st.error(f"Too many files: limit is {CONFIG.max_files}.")
         upload_valid = False
     if total_size_mb > CONFIG.max_total_mb:
-        st.error(
-            f"Upload too large: {total_size_mb:.1f} MB, "
-            f"limit is {CONFIG.max_total_mb} MB. Please upload fewer/smaller files."
-        )
+        st.error(f"Upload too large: limit is {CONFIG.max_total_mb} MB.")
         upload_valid = False
     if upload_valid:
-        st.caption(
-            f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total - within limits."
-        )
+        st.caption(f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total - within limits.")
 
 
 def render_indexing_results(metrics, summary, db_already_existed):
@@ -149,17 +101,8 @@ def render_indexing_results(metrics, summary, db_already_existed):
 
     st.markdown("---")
     st.subheader("Experiment Metrics")
-
-    if db_already_existed:
-        st.info(
-            f"Database status: Loaded existing database - Initialization time: "
-            f"{metrics.chroma_init_time:.2f}s"
-        )
-    else:
-        st.success(
-            f"Database status: Created new database - Initialization time: "
-            f"{metrics.chroma_init_time:.2f}s"
-        )
+    status_msg = "Loaded existing database" if db_already_existed else "Created new database"
+    st.info(f"Database status: {status_msg} - Initialization time: {metrics.chroma_init_time:.2f}s")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -193,88 +136,47 @@ if uploaded_files and upload_valid and st.button("Process PDFs"):
     st.session_state.pipeline_failed = False
     st.session_state.last_ingestion_summary = None
     splitter = build_text_splitter()
-    db_already_existed = vector_db_exists(st.session_state.session_id)
-
-    def _open_vector_db():
-        return open_vector_db(st.session_state.session_id, embeddings)
-
+    db_already_existed = vector_db_exists(SESSION_ID)
     init_start = time.time()
-    ok, vector_db = run_step("Opening / Creating Vector Database", _open_vector_db)
 
-    if ok:
-        def _ingest():
+    def _ingest():
+        with vector_db_session(SESSION_ID, embeddings) as store:
             return ingest_uploaded_files(
                 uploaded_files=uploaded_files,
-                session_id=st.session_state.session_id,
-                vector_db=vector_db,
+                session_id=SESSION_ID,
+                vector_db=store,
                 splitter=splitter,
             )
 
-        ok, ingestion_result = run_step("Processing PDFs in batches", _ingest)
-        if ok:
-            metrics, summary = ingestion_result
-            metrics.chroma_init_time = time.time() - init_start
-            metrics.db_size_mb = get_db_size_mb(st.session_state.session_id)
-            st.session_state.vector_db = vector_db
-            st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + summary.total_chunks
-            st.session_state.metrics = metrics.as_dict()
-            st.session_state.last_ingestion_summary = summary
-            append_jsonl_record(
-                CONFIG.experiment_log_file,
-                {
-                    "timestamp": time.time(),
-                    "session_id": st.session_state.session_id,
-                    "metrics": metrics.as_dict(),
-                },
-            )
-            render_indexing_results(metrics, summary, db_already_existed)
-
-
-if "vector_db" not in st.session_state and vector_db_exists(st.session_state.session_id):
-    try:
-        st.session_state.vector_db = open_vector_db(
-            st.session_state.session_id,
-            embeddings,
+    ok, ingestion_result = run_step("Processing PDFs in batches", _ingest)
+    if ok:
+        metrics, summary = ingestion_result
+        metrics.chroma_init_time = time.time() - init_start
+        metrics.db_size_mb = get_db_size_mb(SESSION_ID)
+        st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + summary.total_chunks
+        st.session_state.metrics = metrics.as_dict()
+        st.session_state.last_ingestion_summary = summary
+        append_jsonl_record(
+            CONFIG.experiment_log_file,
+            {"timestamp": time.time(), "session_id": SESSION_ID, "metrics": metrics.as_dict()},
         )
-
-    except Exception:
-        logging.exception("Database corrupted. Creating new database.")
-
-        clear_session_db(st.session_state.session_id)
-
-        try:
-            st.session_state.vector_db = open_vector_db(
-                st.session_state.session_id,
-                embeddings,
-            )
-            st.info("Previous database was corrupted and has been recreated.")
-
-        except Exception:
-            st.error("Unable to create a new vector database.")
-            logging.exception("Failed to recreate vector database.")
+        render_indexing_results(metrics, summary, db_already_existed)
 
 
-if "vector_db" in st.session_state:
-    vector_db = st.session_state.vector_db
-    query = st.text_input(
-        "Ask a question",
-        placeholder="Ask something about the uploaded PDFs...",
-    )
+db_exists = vector_db_exists(SESSION_ID)
+
+if db_exists:
+    query = st.text_input("Ask a question", placeholder="Ask something about the uploaded PDFs...")
 
     if st.button("Get Answer") and query:
         st.session_state.pipeline_failed = False
-        logging.info(
-            "User Query | %s | %s",
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            query,
-            )
-        ok, retrieval_result = run_step(
-            "Searching Documents",
-            retrieve_documents,
-            vector_db,
-            query,
-            CONFIG.retrieval_k,
-        )
+        logging.info("User Query | %s | %s", time.strftime("%Y-%m-%d %H:%M:%S"), query)
+
+        def _retrieve():
+            with vector_db_session(SESSION_ID, embeddings) as store:
+                return retrieve_documents(store, query, CONFIG.retrieval_k)
+
+        ok, retrieval_result = run_step("Searching Documents", _retrieve)
         if ok:
             raw_results, query_metrics = retrieval_result
             ok, context_result = run_step("Building Context", build_context, raw_results)
@@ -311,6 +213,7 @@ if "vector_db" in st.session_state:
                             st.write(f"Characters: {doc.metadata.get('char_count')}")
                             st.text(doc.page_content[:500])
                             st.divider()
+
         if st.session_state.pipeline_failed:
             st.error("Answer generation stopped due to the failed step above.")
 else:
@@ -318,6 +221,6 @@ else:
 
 
 if not os.environ.get("GROQ_API_KEY"):
-    st.warning("`GROQ_API_KEY` is not set in the environment. Question answering will fail until it is configured.")
+    st.warning("`GROQ_API_KEY` is not set. Question answering will fail until it is configured.")
 
-_ = ExperimentSnapshot(session_id=st.session_state.session_id)
+_ = ExperimentSnapshot(session_id=SESSION_ID)

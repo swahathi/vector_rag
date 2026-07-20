@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import traceback
 import gc
 import hashlib
 import logging
@@ -168,6 +168,13 @@ def ingest_uploaded_files(
             metrics.failed_files += 1
             error_message = f"{uploaded_file.name}: {exc}"
             metrics.errors.append(error_message)
+            print("\n" + "=" * 80)
+            print(f"FAILED PDF : {uploaded_file.name}")
+            print(f"ERROR TYPE : {type(exc).__name__}")
+            print(f"ERROR      : {exc}")
+            traceback.print_exc()
+            logging.exception("Failed to ingest %s", uploaded_file.name)
+            print("=" * 80 + "\n")
             summary.file_results.append(
                 FileIngestionResult(
                     file_name=uploaded_file.name,

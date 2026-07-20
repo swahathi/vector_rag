@@ -13,11 +13,13 @@ class AppConfig:
     log_file: str = "./rag.log"
     experiment_log_file: str = "./experiment_runs.jsonl"
     llm_cache_file: str = "./langchain_cache.db"
+    vector_db_root: str = "./chroma_sessions"
+    collection_name: str = "rag_collection"
 
     max_files: int = 1600
     max_total_mb: int = 10000
-    chunk_size: int = 700
-    chunk_overlap: int = 150
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
     chunk_batch_size: int = 1000
     retrieval_k: int = 20
 
