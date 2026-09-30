@@ -1,163 +1,345 @@
 # Multi-PDF Semantic RAG System
 
-A Streamlit application for asking natural-language questions across multiple PDF documents. Uploaded PDFs are chunked, embedded locally with a sentence-transformer model, and stored in a per-session Chroma vector database. At query time, the most relevant chunks are retrieved and passed to a Groq-hosted Llama model, which produces an answer grounded in your documents along with the source PDFs and retrieved passages.
+A Streamlit-based Retrieval-Augmented Generation (RAG) application for asking natural-language questions across multiple PDF documents.
 
-The app also reports detailed timing and size metrics for every indexing run and query, which makes it useful for experimenting with chunking and retrieval settings.
+The system extracts text from uploaded PDFs, splits the documents into overlapping chunks, generates local semantic embeddings using a Sentence Transformer model, stores them in a vector database, retrieves the most relevant chunks for a user query, and passes the retrieved context to a Groq-hosted Llama model to generate a grounded answer.
 
-## Features
+## Live Demo
 
-- Upload and index many PDFs in a single session
-- Local embeddings with `sentence-transformers/all-MiniLM-L6-v2` (no embedding API key required)
-- Persistent, session-scoped Chroma vector store
-- Duplicate detection using SHA-256 file fingerprints, so re-uploading the same file is skipped
-- Batched ingestion with per-file status reporting (indexed, duplicate, empty, failed)
-- Answer generation with Groq (`llama-3.1-8b-instant`) through LangChain
-- Transparent results: answer, source PDFs, and an expandable view of retrieved chunks with page number, chunk ID, similarity score, and character count
-- Experiment metrics for each run: Chroma initialization, PDF loading, chunking, embedding, vector insertion, total time, and database size
-- Structured logging to a log file and a JSONL experiment log
-- One-click "Clear My Data" to delete the session's vector database
-- Render deployment configuration included
+The application is deployed using Streamlit Community Cloud and can be accessed from the project deployment page.
+
+## Overview
+
+This project focuses on building and evaluating an end-to-end semantic RAG pipeline for multi-document question answering.
+
+The system provides:
+
+* Multi-PDF document ingestion
+* Local semantic embeddings
+* Vector similarity search
+* Retrieval-augmented generation
+* Source-aware answers
+* Retrieved passage inspection
+* Duplicate document detection
+* Batch document processing
+* Indexing and retrieval performance metrics
+* Structured experiment logging
+* Streamlit-based interactive interface
 
 ## How It Works
 
-```
-PDF upload
-    |
-    v
-PyPDFLoader -> text splitter (1000 chars, 200 overlap)
-    |
-    v
-HuggingFace embeddings (all-MiniLM-L6-v2)
-    |
-    v
-Chroma vector store (one per session, with a manifest of indexed files)
-    |
-    v
-Query -> top-k similarity search (k = 20) -> context + prompt -> Groq LLM -> answer + sources
+```text
+                    PDF Documents
+                         |
+                         v
+                  PDF Text Extraction
+                         |
+                         v
+                  Text Chunking
+              (1000 chars, 200 overlap)
+                         |
+                         v
+             Sentence Transformer
+              Embedding Generation
+                         |
+                         v
+                    Vector DB
+                         |
+                         |
+User Question ----------+
+                         |
+                         v
+                  Query Embedding
+                         |
+                         v
+              Similarity Search
+                    (Top-K = 20)
+                         |
+                         v
+                Retrieved Context
+                         |
+                         v
+                  Groq Llama LLM
+                         |
+                         v
+                Grounded Answer
+                         |
+                         v
+             Sources + Retrieved Chunks
 ```
 
-1. **Ingestion.** Each uploaded PDF is fingerprinted with SHA-256. Files already present in the session manifest are skipped. New files are written to a temporary location, loaded page by page, split into overlapping chunks, and tagged with metadata (source PDF, page, chunk ID, chunk index, total chunks, character count, session ID, file fingerprint).
-2. **Indexing.** Chunks are embedded and inserted into Chroma in batches. A manifest records every indexed file and every run.
-3. **Retrieval.** The question is embedded and the top `k` most similar chunks are retrieved with scores.
-4. **Generation.** Retrieved chunks are assembled into a context block and combined with the question in a prompt sent to the Groq LLM.
-5. **Presentation.** The app shows the answer, the list of source PDFs, retrieval metrics, and the raw retrieved chunks.
+### Pipeline
+
+1. **Ingestion**
+
+   Uploaded PDFs are processed and fingerprinted using SHA-256. Duplicate files are detected and skipped.
+
+2. **Text Extraction**
+
+   PDF content is extracted page by page using `PyPDFLoader`.
+
+3. **Chunking**
+
+   Extracted text is divided into overlapping chunks using a recursive character text splitter.
+
+4. **Embedding**
+
+   Each chunk is converted into a semantic vector representation using:
+
+   `sentence-transformers/all-MiniLM-L6-v2`
+
+5. **Vector Storage**
+
+   The generated embeddings and document metadata are stored in the configured vector database.
+
+6. **Retrieval**
+
+   When a user asks a question, the question is embedded and the most semantically relevant document chunks are retrieved using similarity search.
+
+7. **Generation**
+
+   The retrieved chunks are provided as context to the Groq-hosted Llama model, which generates an answer grounded in the retrieved documents.
+
+8. **Presentation**
+
+   The application displays the generated answer, source PDFs, retrieval information, and the retrieved passages used to generate the response.
+
+## Features
+
+### Multi-PDF Support
+
+Upload and process multiple PDF documents within a single session.
+
+### Local Embeddings
+
+Uses `sentence-transformers/all-MiniLM-L6-v2` for local embedding generation, avoiding the need for a separate embedding API.
+
+### Semantic Retrieval
+
+Questions are matched against document chunks using vector similarity rather than simple keyword matching.
+
+### Duplicate Detection
+
+Uploaded files are fingerprinted using SHA-256. If a document has already been indexed, it is skipped instead of being processed again.
+
+### Batch Processing
+
+Documents are processed in batches with individual file status reporting, including:
+
+* Indexed
+* Duplicate
+* Empty
+* Failed
+
+### Source-Aware Answers
+
+The application identifies the PDF documents contributing to the retrieved context and allows users to inspect the retrieved passages.
+
+### Retrieval Transparency
+
+Retrieved chunks expose metadata such as:
+
+* Source PDF
+* Page number
+* Chunk ID
+* Chunk index
+* Similarity score
+* Character count
+
+### Experiment Metrics
+
+The application records timing and size metrics for indexing and querying, making it possible to experiment with different RAG configurations.
 
 ## Project Structure
 
-| File | Responsibility |
-| --- | --- |
-| `app.py` | Streamlit UI and pipeline orchestration (upload, process, ask, display) |
-| `config.py` | Central, immutable configuration (`AppConfig`) |
-| `ingestion.py` | PDF loading, deduplication, metadata tagging, batched indexing |
-| `chunking.py` | Text splitter construction |
-| `embeddings.py` | Embedding model loading |
-| `vectordb.py` | Session-scoped Chroma lifecycle, manifest handling, size reporting, cleanup |
-| `retrieval.py` | Similarity search, context building, prompt construction |
-| `llm.py` | Groq LLM loading |
-| `metrics.py` | Indexing and query metric data structures |
-| `evaluation.py` | Experiment snapshot support |
-| `logging_utils.py` | Log configuration and JSONL record writer |
-| `render.yaml` | Render deployment configuration |
-| `requirements.txt` | Python dependencies |
+| File               | Responsibility                                                |
+| ------------------ | ------------------------------------------------------------- |
+| `app.py`           | Streamlit interface and application orchestration             |
+| `config.py`        | Central application configuration                             |
+| `ingestion.py`     | PDF loading, deduplication, metadata tagging and indexing     |
+| `chunking.py`      | Text splitter configuration                                   |
+| `embeddings.py`    | Embedding model loading                                       |
+| `vectordb.py`      | Vector database lifecycle and storage                         |
+| `retrieval.py`     | Similarity search, context construction and prompt generation |
+| `llm.py`           | Groq LLM configuration                                        |
+| `metrics.py`       | Indexing and query metric structures                          |
+| `evaluation.py`    | Experiment and evaluation support                             |
+| `logging_utils.py` | Application and experiment logging                            |
+| `render.yaml`      | Deployment configuration, if applicable                       |
+| `requirements.txt` | Python dependencies                                           |
+| `README.md`        | Project documentation                                         |
+
+## Tech Stack
+
+* **Python**
+* **Streamlit**
+* **LangChain**
+* **Sentence Transformers**
+* **Vector Database**
+* **Groq**
+* **Llama**
+* **PyPDF**
+* **Pandas**
+* **NumPy**
 
 ## Requirements
 
-- Python 3.10 or newer
-- A Groq API key ([console.groq.com](https://console.groq.com))
-- Enough disk space for the embedding model download and the Chroma database
+* Python 3.10+
+* Groq API key
+* Sufficient storage for the embedding model and vector database
+* Internet connection for downloading required Python packages and the embedding model
 
 ## Installation
 
 ```bash
 git clone https://github.com/swahathi/vector_rag.git
+
 cd vector_rag
 
 python -m venv .venv
-source .venv/bin/activate        # On Windows: .venv\Scripts\activate
+```
 
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
 ## Configuration
 
-Set your Groq API key as an environment variable before starting the app.
+The application requires a Groq API key for question answering.
+
+For local execution, configure:
 
 ```bash
-export GROQ_API_KEY="your-api-key"        # PowerShell: $env:GROQ_API_KEY="your-api-key"
+GROQ_API_KEY="your-api-key"
 ```
 
-The app displays a warning in the UI if `GROQ_API_KEY` is missing; indexing still works, but question answering will fail.
+For Streamlit Community Cloud deployment, configure `GROQ_API_KEY` through the application's Streamlit Secrets settings.
 
-All tunable settings live in `config.py`:
-
-| Setting | Default | Description |
-| --- | --- | --- |
-| `chunk_size` | `1000` | Characters per chunk |
-| `chunk_overlap` | `200` | Overlapping characters between adjacent chunks |
-| `chunk_batch_size` | `1000` | Chunks embedded and inserted per batch |
-| `retrieval_k` | `20` | Number of chunks retrieved per query |
-| `embedding_model_name` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
-| `groq_model_name` | `llama-3.1-8b-instant` | Groq model used for answers |
-| `max_files` | `1600` | Maximum files per upload |
-| `max_total_mb` | `10000` | Maximum total upload size in MB |
-| `vector_db_root` | `./chroma_sessions` | Directory for session vector databases |
-| `collection_name` | `rag_collection` | Chroma collection name |
-| `embed_cache_dir` | `./embedding_cache` | Embedding cache directory |
-| `llm_cache_file` | `./langchain_cache.db` | LangChain LLM cache |
-| `log_file` | `./rag.log` | Application log |
-| `experiment_log_file` | `./experiment_runs.jsonl` | One JSON record per indexing run |
+The API key should never be committed to GitHub.
 
 ## Usage
+
+Run the application locally:
 
 ```bash
 streamlit run app.py
 ```
 
-Then open the local URL printed by Streamlit (usually `http://localhost:8501`) and:
+Then:
 
-1. Upload one or more PDFs with the file uploader.
-2. Click **Process PDFs** and wait for indexing to finish. A metrics panel summarizes the run.
-3. Type a question under **Ask a question** and click **Get Answer**.
-4. Review the answer, the source PDFs, and, if you wish, the retrieved chunks.
+1. Upload one or more PDF documents.
+2. Click **Process PDFs**.
+3. Wait for the indexing process to complete.
+4. Enter a natural-language question.
+5. Click **Get Answer**.
+6. Review the generated answer and source documents.
+7. Expand the retrieved chunks to inspect the context used by the RAG pipeline.
 
-You can upload additional PDFs at any time; already-indexed files are detected and skipped. Use **Clear My Data** in the sidebar to delete the session's vector database and start fresh.
+Additional PDFs can be uploaded and indexed during the session.
 
-## Metrics and Logging
+## Metrics and Experimentation
 
-**Indexing metrics** (shown after each Process PDFs run): Chroma initialization time, PDF loading time, chunking time, embedding time, vector insertion time, total processing time, vector database size, total chunks, PDF count, dataset size, and the chunk size and overlap used.
+The application records metrics for each indexing and retrieval operation.
 
-**Query metrics**: Chroma retrieval time, overall retrieval time, and the configured chunk size.
+### Indexing Metrics
 
-**Logs**:
+The system tracks:
 
-- `rag.log` records pipeline steps, successes, failures, and user queries.
-- `experiment_runs.jsonl` appends one JSON record per indexing run (timestamp, session ID, and full metrics), ready for analysis in pandas or a spreadsheet.
+* PDF loading time
+* Chunking time
+* Embedding time
+* Vector insertion time
+* Total processing time
+* Vector database size
+* Number of PDFs
+* Number of chunks
+* Dataset size
+* Chunk size
+* Chunk overlap
 
-Together these make it straightforward to compare the effect of different `chunk_size`, `chunk_overlap`, `retrieval_k`, or embedding model choices.
+### Query Metrics
 
-## Deployment
+The system records:
 
-The repository includes a `render.yaml` for deploying to [Render](https://render.com). When deploying, set `GROQ_API_KEY` as an environment variable in the service settings. The first start downloads the embedding model, and vector databases are stored on local disk, so attach a persistent disk if you need indexed data to survive restarts.
+* Vector retrieval time
+* Overall retrieval time
+* Number of retrieved chunks
+* Configured retrieval `k`
+
+These metrics make the application useful for experimenting with different:
+
+* Chunk sizes
+* Chunk overlaps
+* Retrieval values
+* Embedding models
+* Vector database configurations
+
+## Experiment Logging
+
+The application maintains structured logs for pipeline execution and experiments.
+
+`rag.log` records application events, processing steps, failures, and queries.
+
+`experiment_runs.jsonl` stores structured experiment records that can be analysed using Python, Pandas, or spreadsheet software.
 
 ## Limitations
 
-- Only text-based PDFs are supported. Scanned documents without a text layer will be reported as empty, since no OCR is performed.
-- The app uses a single fixed session ID, so all users of one running instance share the same vector database.
-- Answer quality depends on the retrieved context, the embedding model, and the chosen LLM. Adjust the settings in `config.py` to tune behavior.
+* Only text-based PDFs are supported.
+* Scanned PDFs without an available text layer require OCR, which is not currently implemented.
+* Retrieval quality depends on the embedding model, chunking strategy and retrieval configuration.
+* Answer quality depends on the retrieved context and the selected LLM.
+* Streamlit deployment environments have resource and execution limitations for very large document collections.
+* API-based LLM generation requires a valid Groq API key.
 
-## Tech Stack
+## Future Improvements
 
-- [Streamlit](https://streamlit.io) for the interface
-- [LangChain](https://www.langchain.com) for document loading, splitting, and LLM integration
-- [Chroma](https://www.trychroma.com) as the vector database
-- [Sentence Transformers](https://www.sbert.net) for embeddings
-- [Groq](https://groq.com) for LLM inference
-- [pypdf](https://pypdf.readthedocs.io) for PDF parsing
+Potential extensions include:
+
+* Hybrid keyword + semantic retrieval
+* Reranking retrieved chunks
+* Improved evaluation using RAG-specific metrics
+* Support for OCR-based PDFs
+* Metadata filtering
+* Multiple embedding model comparisons
+* Retrieval latency benchmarking
+* Larger-scale vector database evaluation
+* Automated question-answer evaluation
+* Improved multi-user session isolation
+
+## Why This Project
+
+This project was developed to explore the practical implementation and evaluation of Retrieval-Augmented Generation systems over multiple PDF documents.
+
+The main focus is not only generating answers, but also understanding the individual stages of a RAG pipeline, including document ingestion, chunking, embedding generation, vector indexing, similarity retrieval, context construction, LLM generation, and performance measurement.
+
+## Deployment
+
+The application is deployed using **Streamlit Community Cloud**.
+
+The deployed application requires the `GROQ_API_KEY` to be configured through Streamlit Secrets for question answering to work.
 
 ## Contributing
 
-Issues and pull requests are welcome. For larger changes, please open an issue first to discuss the approach.
+Issues and pull requests are welcome.
+
+For significant changes, open an issue first to discuss the proposed approach.
 
 ## License
 
-No license has been specified yet. 
+No license has been specified yet.
+
+If this project is intended to be distributed publicly, add an appropriate `LICENSE` file such as MIT or Apache-2.0.
