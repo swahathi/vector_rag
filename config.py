@@ -1,4 +1,4 @@
-
+﻿
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,19 +19,18 @@ class AppConfig:
     collection_name: str = "rag_collection"
 
     # Document processing
-    # Streamlit Community Cloud is a 1 GB RAM container; keep these
-    # values conservative so the app survives a cold start + ingestion
-    # without being OOM-killed.
-    max_files: int = 10          # was 1600 — absurd on a 1 GB container
-    max_total_mb: int = 50       # was 10000 — would fill /tmp instantly
+    # max_files / max_total_mb are upload validation guards only - PDFs
+    # are processed sequentially and temp files deleted after each one,
+    # so these limits do not drive peak RAM usage.
+    max_files: int = 1600
+    max_total_mb: int = 1000
     chunk_size: int = 1000
     chunk_overlap: int = 200
-    chunk_batch_size: int = 100  # was 1000 — embed 1000 chunks = OOM spike
+    # Keep batch size modest: limits per-batch embedding RAM spike
+    chunk_batch_size: int = 100
 
     # Retrieval
-    # 20 chunks × ~512 tokens each → very large prompts that can hit
-    # Groq's context window hard. 6–8 is sufficient for semantic RAG.
-    retrieval_k: int = 6         # was 20
+    retrieval_k: int = 6
 
     # Embeddings
     embedding_model_name: str = (
