@@ -21,6 +21,7 @@ rag.log
 vector_db/
 embedding_cache/
 chroma_db/
+chroma_sessions/
 
 # LangChain cache
 langchain_cache.db
@@ -28,3 +29,5 @@ langchain_cache.db
 # OS files
 .DS_Store
 Thumbs.db
+# Local experiment log
+experiment_runs.jsonl
