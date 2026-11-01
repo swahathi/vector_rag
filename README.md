@@ -6,8 +6,12 @@ The system extracts text from uploaded PDFs, splits the documents into overlappi
 
 ## Live Demo
 
-The application is deployed using Streamlit Community Cloud and can be accessed from the project deployment page.
+The application is deployed using Streamlit Community Cloud.
 
+**Access the live application:**  
+[Multi-PDF Semantic RAG – Live Demo](https://multi-pdf-semantic-rag.streamlit.app/)
+
+You can upload multiple PDF documents, process them, and ask natural-language questions to retrieve context-aware answers.
 ## Overview
 
 This project focuses on building and evaluating an end-to-end semantic RAG pipeline for multi-document question answering.
