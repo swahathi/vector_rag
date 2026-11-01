@@ -54,7 +54,17 @@ def _add_documents_in_batches(vector_db, chunks, batch_size: int) -> tuple[float
         embedding_time += elapsed
         insertion_time += elapsed
     return embedding_time, insertion_time
+def benchmark_embedding_time(embeddings, chunks, batch_size):
+    embedding_time=0.0
+    for start in range(0,len(chunks), batch_size):
+        batch=chunks[start:start+batch_size]
+        texts=[doc.page_content for doc in batch]
 
+        start_time=time.time()
+        embeddings.embed_documents(texts)
+        embedding_time+=time.time()-start_time #for a chunk embedding creation only
+
+    return embedding_time
 
 def ingest_uploaded_files(
     uploaded_files,

@@ -8,7 +8,7 @@ from metrics import QueryMetrics
 def retrieve_documents(vector_db, query: str, k: int):
     metrics = QueryMetrics()
     start = time.time()
-    results = vector_db.similarity_search_with_relevance_scores(query, k=20)
+    results = vector_db.similarity_search_with_relevance_scores(query, k=k)
     metrics.chroma_retrieval_time = time.time() - start
     metrics.retrieval_time = metrics.chroma_retrieval_time
     return results, metrics

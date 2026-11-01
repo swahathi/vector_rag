@@ -84,6 +84,7 @@ def vector_db_session(session_id: str, embeddings):
         collection_name=CONFIG.collection_name,
         embedding_function=embeddings,
     )
+   
 
     try:
         yield store
