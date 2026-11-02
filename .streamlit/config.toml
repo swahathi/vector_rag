@@ -1,0 +1,11 @@
+[server]
+# Raise the WebSocket message size limit so that uploading 1000+ PDFs
+# at once does not cause "Error running app" before processing starts.
+# Streamlit sends all selected files over a single WebSocket message;
+# the default 200 MB cap is easily exceeded when selecting hundreds of PDFs.
+maxUploadSize = 10000       # MB – per-file upload cap (matches CONFIG.max_total_mb)
+maxMessageSize = 10000      # MB – total WebSocket payload cap (THE key fix)
+
+[browser]
+# Suppresses the "Are you sure you want to leave?" dialog during long runs
+gatherUsageStats = false
