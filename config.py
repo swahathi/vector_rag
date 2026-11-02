@@ -23,7 +23,7 @@ class AppConfig:
     # are processed sequentially and temp files deleted after each one,
     # so these limits do not drive peak RAM usage.
     max_files: int = 1600
-    max_total_mb: int = 1000
+    max_total_mb: int = 10000
     chunk_size: int = 1000
     chunk_overlap: int = 200
     # Keep batch size modest: limits per-batch embedding RAM spike
