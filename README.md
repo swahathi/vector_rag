@@ -8,7 +8,7 @@ The system extracts text from uploaded PDFs, splits documents into overlapping c
 
 ## Quick Start
 
-> **Live demo:** [https://multi-pdf-semantic-rag.streamlit.app/](https://multi-pdf-semantic-rag.streamlit.app/)
+> **Live demo:** https://vectorrag-semantic.streamlit.app/
 >
 > The app is hosted on Streamlit Community Cloud's free tier. If it has not received traffic recently, it may take 20–30 seconds to wake up before accepting uploads.
 
