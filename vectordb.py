@@ -1,13 +1,16 @@
+import gc
+import json
 import logging
 import os
 import shutil
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
-import chromadb
-from chromadb.config import Settings
-from langchain_chroma import Chroma
+from langchain_qdrant import QdrantVectorStore
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as rest
 
 from config import CONFIG
 
@@ -42,8 +45,6 @@ def get_db_size_mb(session_id: str) -> float:
 
 
 def load_manifest(session_id: str) -> dict:
-    import json
-
     manifest_path = _session_dir(session_id) / "manifest.json"
     if not manifest_path.exists():
         return {"indexed_files": {}}
@@ -52,22 +53,33 @@ def load_manifest(session_id: str) -> dict:
 
 
 def save_manifest(session_id: str, manifest: dict) -> None:
-    import json
-
     path = _session_dir(session_id)
     path.mkdir(parents=True, exist_ok=True)
     with open(path / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f)
 
 
+def ensure_collection_exists(
+    client: QdrantClient,
+    collection_name: str,
+    vector_size: int = 384,
+    distance: rest.Distance = rest.Distance.COSINE,
+) -> None:
+    """Ensure collection exists in Qdrant with the appropriate vector dimension."""
+    if not client.collection_exists(collection_name):
+        logging.info("Creating local Qdrant collection '%s' (dim=%d)...", collection_name, vector_size)
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=rest.VectorParams(size=vector_size, distance=distance),
+        )
+
+
 @contextmanager
 def vector_db_session(session_id: str, embeddings):
     """
-    Opens a Chroma client scoped to this `with` block only.
-    Guarantees the underlying sqlite3 connection is explicitly
-    closed before the block exits, on every code path (success
-    or exception), so no handle survives into the next Streamlit
-    rerun or into a delete operation.
+    Opens a Qdrant client scoped to this `with` block only.
+    Guarantees the underlying client connection is cleanly closed
+    before the block exits.
     """
     lock = _get_session_lock(session_id)
     lock.acquire()
@@ -75,57 +87,55 @@ def vector_db_session(session_id: str, embeddings):
     path = _session_dir(session_id)
     path.mkdir(parents=True, exist_ok=True)
 
-    client = chromadb.PersistentClient(
-        path=str(path),
-        settings=Settings(anonymized_telemetry=False, allow_reset=True),
-    )
-    store = Chroma(
+    client = QdrantClient(path=str(path))
+    collection_name = CONFIG.collection_name
+    vector_size = getattr(CONFIG, "embedding_dimension", 384)
+    ensure_collection_exists(client, collection_name, vector_size=vector_size)
+
+    store = QdrantVectorStore(
         client=client,
-        collection_name=CONFIG.collection_name,
-        embedding_function=embeddings,
+        collection_name=collection_name,
+        embedding=embeddings,
     )
-   
 
     try:
         yield store
     finally:
         try:
-            # Explicitly release chromadb's sqlite connection pool.
-            # This is the deterministic close that gc.collect()
-            # cannot guarantee: chromadb's SqliteDB keeps a live
-            # sqlite3.Connection in a pool object referenced by
-            # the client's internal `_producer`/`_system`. reset()
-            # is not what closes it — calling the private connection
-            # close is required on the API version pinned in config.
-            client.clear_system_cache()
+            client.close()
         except Exception:
-            logging.exception("Error while releasing Chroma client")
+            logging.exception("Error while closing Qdrant client")
         finally:
+            del store
+            del client
+            gc.collect()
             lock.release()
 
 
 def clear_session_db(session_id: str) -> None:
     """
-    Deletes the on-disk Chroma database for a session.
+    Deletes the on-disk Qdrant database for a session.
     Safe to call while the app is running because no code path
-    in this module ever stores a client/store object across
-    Streamlit reruns — every client is opened and released
-    within a single `with vector_db_session(...)` block, so by
-    the time this function runs, no file handle is held by
-    this process.
+    stores a client object across Streamlit reruns.
     """
     lock = _get_session_lock(session_id)
     with lock:
         path = _session_dir(session_id)
         if not path.exists():
             return
-        try:
-            shutil.rmtree(path)
-        except PermissionError as exc:
-            logging.exception("Failed to delete vector DB directory")
-            raise PermissionError(
-                "The database directory could not be deleted. "
-                "If this persists, an external process (antivirus, "
-                "file indexer, or a second Streamlit worker) may be "
-                "holding the file open."
-            ) from exc
+        gc.collect()
+        for attempt in range(3):
+            try:
+                shutil.rmtree(path)
+                return
+            except PermissionError as exc:
+                if attempt < 2:
+                    time.sleep(0.25)
+                    gc.collect()
+                else:
+                    logging.exception("Failed to delete vector DB directory")
+                    raise PermissionError(
+                        "The database directory could not be deleted. "
+                        "If this persists, an external process may be "
+                        "holding the file open."
+                    ) from exc

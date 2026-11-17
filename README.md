@@ -2,7 +2,7 @@
 
 A Streamlit-based Retrieval-Augmented Generation (RAG) application for asking natural-language questions across multiple PDF documents.
 
-The system extracts text from uploaded PDFs, splits documents into overlapping chunks, generates local semantic embeddings using `sentence-transformers/all-MiniLM-L6-v2`, stores them in a ChromaDB vector store, retrieves the most relevant chunks for a user query, and passes the retrieved context to a Groq-hosted Llama model to generate a grounded answer.
+The system extracts text from uploaded PDFs, splits documents into overlapping chunks, generates local semantic embeddings using `sentence-transformers/all-MiniLM-L6-v2`, stores them in a Qdrant vector store, retrieves the most relevant chunks for a user query, and passes the retrieved context to a Groq-hosted Llama model to generate a grounded answer.
 
 ---
 
@@ -60,7 +60,7 @@ The system provides:
 * Multi-PDF document ingestion (up to 1,600 files, 10,000 MB per session)
 * SHA-256 duplicate detection
 * Local semantic embeddings (no external embedding API)
-* Persistent ChromaDB vector store
+* Persistent Qdrant vector store
 * Retrieval-augmented generation with source attribution
 * Retrieved passage inspection with similarity scores
 * Batch document processing with per-file status reporting
@@ -90,7 +90,7 @@ The system provides:
             L2-normalised, CPU inference)
                          |
                          v
-                  ChromaDB (persistent,
+                  Qdrant (persistent,
                   cosine similarity via
                   normalised L2 distance)
                          |
@@ -138,11 +138,11 @@ User Question ----------+
 
 5. **Vector Storage**
 
-   Embeddings and chunk metadata are stored in a **ChromaDB** persistent store (`chromadb==1.5.9`). Each session uses a separate on-disk collection. The ChromaDB client is opened and explicitly released within a context manager for each operation — no client object is held across Streamlit reruns.
+   Embeddings and chunk metadata are stored in a **Qdrant** persistent store (`qdrant-client`). Each session uses a separate on-disk collection. The Qdrant client is opened and explicitly released within a context manager for each operation — no client object is held across Streamlit reruns.
 
 6. **Retrieval**
 
-   The query is embedded using the same model. ChromaDB's `similarity_search_with_relevance_scores` retrieves the top-k most similar chunks. Because embeddings are L2-normalised, the underlying L2 distance is equivalent to cosine similarity. The default `k` is **6**.
+   The query is embedded using the same model. Qdrant's `similarity_search_with_relevance_scores` retrieves the top-k most similar chunks. Because embeddings are L2-normalised, the underlying L2 distance is equivalent to cosine similarity. The default `k` is **6**.
 
 7. **Generation**
 
@@ -158,19 +158,19 @@ User Question ----------+
 
 ### Multi-PDF Support
 
-Upload and process multiple PDF documents within a single session. Each session maintains its own ChromaDB collection and manifest.
+Upload and process multiple PDF documents within a single session. Each session maintains its own Qdrant collection and manifest.
 
 ### Local Embeddings
 
 Uses `sentence-transformers/all-MiniLM-L6-v2` for local CPU embedding generation. No external embedding API or key is required.
 
-### ChromaDB Persistent Vector Store
+### Qdrant Persistent Vector Store
 
-Embeddings are persisted to disk in a session-scoped ChromaDB directory. The store survives application restarts and supports incremental indexing — new files can be added to an existing session without re-indexing previously processed documents.
+Embeddings are persisted to disk in a session-scoped Qdrant directory. The store survives application restarts and supports incremental indexing — new files can be added to an existing session without re-indexing previously processed documents.
 
 ### Semantic Retrieval
 
-Queries are matched against indexed chunks using cosine similarity (via L2-normalised embeddings in ChromaDB). Each retrieved chunk is returned with its relevance score.
+Queries are matched against indexed chunks using cosine similarity (via L2-normalised embeddings in Qdrant). Each retrieved chunk is returned with its relevance score.
 
 ### Duplicate Detection
 
@@ -178,7 +178,7 @@ Uploaded files are fingerprinted using SHA-256 before any processing. If a file 
 
 ### Batch Processing
 
-Chunks are inserted into ChromaDB in configurable batches (default: 100 chunks per batch) to limit peak RAM usage. Each file is processed and its temp file deleted before the next file begins.
+Chunks are inserted into Qdrant in configurable batches (default: 100 chunks per batch) to limit peak RAM usage. Each file is processed and its temp file deleted before the next file begins.
 
 ### Source-Aware Answers
 
@@ -266,7 +266,7 @@ The following are placeholder entries in the format used to document observed fa
 | `ingestion.py`     | PDF loading, deduplication, metadata tagging and indexing     |
 | `chunking.py`      | Text splitter configuration                                   |
 | `embeddings.py`    | Embedding model loading and disk-backed cache                 |
-| `vectordb.py`      | ChromaDB lifecycle, session management, manifest persistence  |
+| `vectordb.py`      | Qdrant lifecycle, session management, manifest persistence  |
 | `retrieval.py`     | Similarity search, context construction and prompt generation |
 | `llm.py`           | Groq LLM configuration and SQLite response cache             |
 | `metrics.py`       | Indexing and query metric dataclasses                         |
@@ -281,9 +281,9 @@ The following are placeholder entries in the format used to document observed fa
 
 * **Python 3.10+**
 * **Streamlit** — interactive web interface
-* **LangChain** (`langchain`, `langchain-community`, `langchain-chroma`, `langchain-huggingface`, `langchain-classic`) — pipeline orchestration
+* **LangChain** (`langchain`, `langchain-community`, `langchain-qdrant`, `langchain-huggingface`, `langchain-classic`) — pipeline orchestration
 * **sentence-transformers / all-MiniLM-L6-v2** — local CPU embedding model (384-dim)
-* **ChromaDB 1.5.9** — persistent vector store (cosine similarity via normalised L2)
+* **Qdrant 1.5.9** — persistent vector store (cosine similarity via normalised L2)
 * **Groq / llama-3.1-8b-instant** — hosted LLM for answer generation
 * **PyPDF** — PDF text extraction
 
@@ -293,7 +293,7 @@ The following are placeholder entries in the format used to document observed fa
 
 * Python 3.10+
 * Groq API key (free tier available at [console.groq.com](https://console.groq.com))
-* Disk space for the embedding model (~90 MB) and ChromaDB collections
+* Disk space for the embedding model (~90 MB) and Qdrant collections
 * Internet connection for package installation and the Groq API
 
 ---
@@ -368,7 +368,7 @@ Then:
 
 Additional PDFs can be uploaded and indexed incrementally during the session without re-indexing previously processed documents.
 
-Use **Clear My Data** in the sidebar to delete the session's ChromaDB collection and manifest and start fresh.
+Use **Clear My Data** in the sidebar to delete the session's Qdrant collection and manifest and start fresh.
 
 ---
 
@@ -385,21 +385,21 @@ The application records metrics for every indexing and retrieval operation.
 | `load_time` | Time spent in PyPDFLoader across all files |
 | `chunk_time` | Time spent in the text splitter |
 | `embedding_time` | Time spent embedding and inserting chunks |
-| `vector_insertion_time` | Time spent in ChromaDB `add_documents` calls |
-| `chroma_init_time` | Time to open the ChromaDB client |
+| `vector_insertion_time` | Time spent in Qdrant `add_documents` calls |
+| `qdrant_init_time` | Time to open the Qdrant client |
 | `total_indexing_time` | Wall-clock time for the full indexing run |
 | `total_chunks` | Chunks inserted in this run |
 | `processed_files` | Files successfully indexed |
 | `skipped_duplicates` | Files skipped due to SHA-256 match |
 | `failed_files` | Files that raised an exception |
-| `db_size_mb` | On-disk size of the ChromaDB collection after indexing |
+| `db_size_mb` | On-disk size of the Qdrant collection after indexing |
 | `chunk_size` / `chunk_overlap` | Configuration used for this run |
 
 ### Query Metrics
 
 | Metric | Description |
 |--------|------------|
-| `chroma_retrieval_time` | Time for the ChromaDB similarity search call |
+| `qdrant_retrieval_time` | Time for the Qdrant similarity search call |
 | `retrieval_time` | Total retrieval wall-clock time |
 
 These metrics are displayed in the UI after each operation and also written to `experiment_runs.jsonl`, making it straightforward to compare runs with different chunk sizes, overlaps, or top-k values using Python or a spreadsheet.
@@ -459,7 +459,7 @@ print(df[["chunk_size", "chunk_overlap", "total_chunks", "embedding_time", "tota
 
 This project was developed for two related reasons.
 
-The first is practical: building a complete RAG pipeline from scratch, rather than using an off-the-shelf framework, forces engagement with each stage individually — chunking decisions, embedding normalisation, ChromaDB client lifecycle management, prompt construction — and makes it easier to reason about where failures originate.
+The first is practical: building a complete RAG pipeline from scratch, rather than using an off-the-shelf framework, forces engagement with each stage individually — chunking decisions, embedding normalisation, Qdrant client lifecycle management, prompt construction — and makes it easier to reason about where failures originate.
 
 The second is research-oriented. Building the pipeline made it clear that the harder problem is not *how* to build a RAG system but *how to know whether it is working correctly*. Specifically: given a fixed document corpus, how should one systematically test whether the system's answers are correct and grounded in the source material? And how do chunking parameters and retrieval depth interact to affect answer quality?
 
@@ -471,10 +471,10 @@ These are open questions at the intersection of software testing, formal groundi
 
 > **Suggested one-line description** (paste into the repo's "About" field on GitHub):
 >
-> *Multi-PDF semantic RAG system built with Streamlit, LangChain, ChromaDB, and Groq — with a focus on retrieval correctness and evaluation methodology.*
+> *Multi-PDF semantic RAG system built with Streamlit, LangChain, Qdrant, and Groq — with a focus on retrieval correctness and evaluation methodology.*
 
 > **Suggested topics:**
-> `rag` `llm` `langchain` `chromadb` `retrieval-augmented-generation` `streamlit` `sentence-transformers` `information-retrieval`
+> `rag` `llm` `langchain` `qdrant-client` `retrieval-augmented-generation` `streamlit` `sentence-transformers` `information-retrieval`
 
 ---
 

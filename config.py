@@ -1,4 +1,4 @@
-﻿
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,31 +11,27 @@ class AppConfig:
 
     # Storage
     embed_cache_dir: str = "./embedding_cache"
-    vector_db_root: str = "./chroma_sessions"
+    vector_db_root: str = "./qdrant_sessions"
     log_file: str = "./rag.log"
     experiment_log_file: str = "./experiment_runs.jsonl"
     llm_cache_file: str = "./langchain_cache.db"
 
-    collection_name: str = "rag_collection"
+    # Vector DB / Qdrant settings
+    collection_name: str = os.getenv("QDRANT_COLLECTION_NAME", "app_collection")
+    embedding_dimension: int = 384
 
     # Document processing
-    # max_files / max_total_mb are upload validation guards only - PDFs
-    # are processed sequentially and temp files deleted after each one,
-    # so these limits do not drive peak RAM usage.
     max_files: int = 1600
     max_total_mb: int = 10000
     chunk_size: int = 1000
     chunk_overlap: int = 200
-    # Keep batch size modest: limits per-batch embedding RAM spike
     chunk_batch_size: int = 100
 
     # Retrieval
     retrieval_k: int = 6
 
     # Embeddings
-    embedding_model_name: str = (
-        "sentence-transformers/all-MiniLM-L6-v2"
-    )
+    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_namespace: str = "all-MiniLM-L6-v2"
 
     # LLM

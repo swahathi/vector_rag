@@ -16,7 +16,7 @@ class IndexingMetrics:
     embedding_time: float = 0.0
     vector_insertion_time: float = 0.0
     retrieval_latency: float = 0.0
-    chroma_init_time: float = 0.0
+    qdrant_init_time: float = 0.0
     total_indexing_time: float = 0.0
     total_chunks: int = 0
     processed_files: int = 0
@@ -25,6 +25,14 @@ class IndexingMetrics:
     failed_files: int = 0
     db_size_mb: float = 0.0
     errors: list[str] = field(default_factory=list)
+
+    @property
+    def chroma_init_time(self) -> float:
+        return self.qdrant_init_time
+
+    @chroma_init_time.setter
+    def chroma_init_time(self, val: float):
+        self.qdrant_init_time = val
 
     def as_dict(self) -> dict[str, float | int | str | list[str]]:
         return {
@@ -37,7 +45,7 @@ class IndexingMetrics:
             "embedding_time": round(self.embedding_time, 2),
             "vector_insertion_time": round(self.vector_insertion_time, 2),
             "retrieval_latency": round(self.retrieval_latency, 4),
-            "chroma_init_time": round(self.chroma_init_time, 2),
+            "qdrant_init_time": round(self.qdrant_init_time, 2),
             "total_indexing_time": round(self.total_indexing_time, 2),
             "total_chunks": self.total_chunks,
             "processed_files": self.processed_files,
@@ -51,11 +59,19 @@ class IndexingMetrics:
 
 @dataclass
 class QueryMetrics:
-    chroma_retrieval_time: float = 0.0
+    qdrant_retrieval_time: float = 0.0
     retrieval_time: float = 0.0
+
+    @property
+    def chroma_retrieval_time(self) -> float:
+        return self.qdrant_retrieval_time
+
+    @chroma_retrieval_time.setter
+    def chroma_retrieval_time(self, val: float):
+        self.qdrant_retrieval_time = val
 
     def as_dict(self) -> dict[str, float]:
         return {
-            "chroma_retrieval_time": round(self.chroma_retrieval_time, 4),
+            "qdrant_retrieval_time": round(self.qdrant_retrieval_time, 4),
             "retrieval_time": round(self.retrieval_time, 4),
         }

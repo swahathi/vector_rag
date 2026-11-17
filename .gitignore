@@ -12,6 +12,8 @@ venv312/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # Logs
 *.log
@@ -22,6 +24,8 @@ vector_db/
 embedding_cache/
 chroma_db/
 chroma_sessions/
+qdrant_sessions/
+qdrant_db/
 
 # LangChain cache
 langchain_cache.db

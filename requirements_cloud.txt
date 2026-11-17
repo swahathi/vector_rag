@@ -1,0 +1,32 @@
+# requirements_cloud.txt
+# Dependencies for the scalable-ingestion branch.
+#
+# Extends requirements.txt with qdrant-client for Qdrant Cloud.
+#
+# Install with:
+#     pip install -r requirements_cloud.txt
+
+# ── Inherited from main branch requirements.txt ───────────────────────────
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple/
+
+streamlit
+langchain
+langchain-community
+langchain-text-splitters
+langchain-core
+langchain-classic
+langchain-groq
+langchain-qdrant
+langchain-huggingface
+
+qdrant-client
+sentence-transformers
+transformers
+torch
+
+pypdf
+cryptography
+
+# ── Qdrant Cloud client ──────────────────────────────────────────────────
+# qdrant-client connects to Qdrant Cloud via QDRANT_URL and QDRANT_API_KEY.

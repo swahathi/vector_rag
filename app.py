@@ -1,6 +1,7 @@
 import logging
+import os
 import time
-import os as os
+
 import streamlit as st
 
 from chunking import build_text_splitter
@@ -8,7 +9,7 @@ from config import CONFIG
 from embeddings import load_embeddings
 from evaluation import ExperimentSnapshot
 from ingestion import ingest_uploaded_files
-from llm import load_llm
+from llm import get_groq_api_key, load_llm
 from logging_utils import append_jsonl_record, configure_logging
 from retrieval import build_context, build_prompt, retrieve_documents
 from vectordb import (
@@ -102,11 +103,11 @@ def render_indexing_results(metrics, summary, db_already_existed):
     st.markdown("---")
     st.subheader("Experiment Metrics")
     status_msg = "Loaded existing database" if db_already_existed else "Created new database"
-    st.info(f"Database status: {status_msg} - Initialization time: {metrics.chroma_init_time:.2f}s")
+    st.info(f"Database status: {status_msg} - Initialization time: {metrics.qdrant_init_time:.2f}s")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Chroma initialization", f"{metrics.chroma_init_time:.2f}s")
+        st.metric("Vector DB initialization", f"{metrics.qdrant_init_time:.2f}s")
         st.metric("PDF loading", f"{metrics.load_time:.2f}s")
         st.metric("Chunking", f"{metrics.chunk_time:.2f}s")
         st.metric("Embedding", f"{metrics.embedding_time:.2f}s")
@@ -151,7 +152,7 @@ if uploaded_files and upload_valid and st.button("Process PDFs"):
     ok, ingestion_result = run_step("Processing PDFs in batches", _ingest)
     if ok:
         metrics, summary = ingestion_result
-        metrics.chroma_init_time = time.time() - init_start
+        metrics.qdrant_init_time = time.time() - init_start
         metrics.db_size_mb = get_db_size_mb(SESSION_ID)
         st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + summary.total_chunks
         st.session_state.metrics = metrics.as_dict()
@@ -192,7 +193,7 @@ if db_exists:
                     st.markdown("### Retrieval Metrics")
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Chroma Retrieval Time", f"{query_metrics.chroma_retrieval_time:.4f}s")
+                        st.metric("Qdrant Retrieval Time", f"{query_metrics.qdrant_retrieval_time:.4f}s")
                     with col2:
                         st.metric("Overall Retrieval Time", f"{query_metrics.retrieval_time:.4f}s")
                     with col3:
@@ -205,7 +206,7 @@ if db_exists:
                     with st.expander("Retrieved Chunks"):
                         for index, (doc, score) in enumerate(raw_results, start=1):
                             st.markdown(f"### Chunk {index}")
-                            st.write(f"Source: {doc.metadata.get('source_pdf')}")
+                            st.write(f"Source: {doc.metadata.get('source_pdf') or doc.metadata.get('filename') or 'Unknown'}")
                             st.write(f"Page: {doc.metadata.get('page')}")
                             st.write(f"Chunk ID: {doc.metadata.get('chunk_id')}")
                             st.write(f"Chunk Index: {doc.metadata.get('chunk_index')}")
@@ -220,7 +221,7 @@ else:
     st.info("Upload PDFs and click Process PDFs.")
 
 
-if not os.environ.get("GROQ_API_KEY"):
+if not get_groq_api_key():
     st.warning("`GROQ_API_KEY` is not set. Question answering will fail until it is configured.")
 
 _ = ExperimentSnapshot(session_id=SESSION_ID)
