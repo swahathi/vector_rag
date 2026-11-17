@@ -19,6 +19,11 @@ from vectordb import (
     vector_db_exists,
     vector_db_session,
 )
+from vectordb_cloud import (
+    cloud_collection_exists,
+    collection_count,
+    vector_db_session as cloud_vector_db_session,
+)
 
 st.set_page_config(page_title=CONFIG.page_title, layout=CONFIG.page_layout)
 st.title(CONFIG.app_title)
@@ -54,41 +59,122 @@ with st.spinner("Initializing models..."):
     embeddings = load_embeddings()
     llm = load_llm()
 
+# Determine Qdrant Cloud connectivity
+has_qdrant_cloud_config = bool(
+    os.getenv("QDRANT_URL")
+    or (hasattr(st, "secrets") and ("QDRANT_URL" in st.secrets or "qdrant" in st.secrets))
+)
+
+cloud_vector_count = 0
+cloud_connected = False
+if has_qdrant_cloud_config:
+    try:
+        cloud_vector_count = collection_count()
+        cloud_connected = True
+    except Exception as exc:
+        logging.warning("Could not connect to Qdrant Cloud: %s", exc)
+
+# Sidebar mode selection
+mode_options = []
+if cloud_connected or has_qdrant_cloud_config:
+    mode_options.append("Qdrant Cloud Mode")
+mode_options.append("Upload PDFs (Session)")
+
+default_idx = (
+    0
+    if (cloud_connected and cloud_vector_count > 0)
+    else (0 if has_qdrant_cloud_config else len(mode_options) - 1)
+)
+
 with st.sidebar:
-    st.markdown("### Session")
-    st.caption(f"Session ID: `{SESSION_ID[:8]}...`")
-    if "chunk_count" in st.session_state:
-        st.caption(f"Indexed chunks: {st.session_state.chunk_count}")
+    st.markdown("### Data Source")
+    selected_mode = st.radio(
+        "Mode",
+        options=mode_options,
+        index=default_idx,
+        help="Switch between cloud-indexed vectors or uploading files locally.",
+    )
 
-    manifest = load_manifest(SESSION_ID)
-    st.caption(f"Indexed PDFs in session: {len(manifest.get('indexed_files', {}))}")
+    if selected_mode == "Qdrant Cloud Mode":
+        st.markdown("---")
+        st.markdown("### Qdrant Cloud Status")
+        if cloud_connected:
+            st.success(f"Connected: {cloud_vector_count:,} vectors in `{CONFIG.collection_name}`")
+        else:
+            st.warning("Configured, but unable to connect to cluster.")
+        st.caption("PDF ingestion is run in Google Colab (`colab_ingestion.ipynb`) directly to Qdrant Cloud.")
+    else:
+        st.markdown("---")
+        st.markdown("### Session")
+        st.caption(f"Session ID: `{SESSION_ID[:8]}...`")
+        if "chunk_count" in st.session_state:
+            st.caption(f"Indexed chunks: {st.session_state.chunk_count}")
 
-    if st.button("Clear My Data"):
-        for key in ("chunk_count", "metrics", "last_ingestion_summary"):
-            st.session_state.pop(key, None)
-        try:
-            clear_session_db(SESSION_ID)
-            st.session_state.pipeline_failed = False
-            st.success("Vector database deleted successfully.")
-            st.rerun()
-        except PermissionError as exc:
-            st.error(str(exc))
+        manifest = load_manifest(SESSION_ID)
+        st.caption(f"Indexed PDFs in session: {len(manifest.get('indexed_files', {}))}")
+
+        if st.button("Clear My Data"):
+            for key in ("chunk_count", "metrics", "last_ingestion_summary"):
+                st.session_state.pop(key, None)
+            try:
+                clear_session_db(SESSION_ID)
+                st.session_state.pipeline_failed = False
+                st.success("Vector database deleted successfully.")
+                st.rerun()
+            except PermissionError as exc:
+                st.error(str(exc))
 
 
-uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
-st.caption(f"Limit: {CONFIG.max_files} files, {CONFIG.max_total_mb} MB total per session.")
+def render_qa_interface(store_context_mgr, placeholder_text="Ask something about the documents..."):
+    query = st.text_input("Ask a question", placeholder=placeholder_text)
+    if st.button("Get Answer") and query:
+        st.session_state.pipeline_failed = False
+        logging.info("User Query | %s | %s", time.strftime("%Y-%m-%d %H:%M:%S"), query)
 
-upload_valid = True
-if uploaded_files:
-    total_size_mb = sum(file.size for file in uploaded_files) / (1024 * 1024)
-    if len(uploaded_files) > CONFIG.max_files:
-        st.error(f"Too many files: limit is {CONFIG.max_files}.")
-        upload_valid = False
-    if total_size_mb > CONFIG.max_total_mb:
-        st.error(f"Upload too large: limit is {CONFIG.max_total_mb} MB.")
-        upload_valid = False
-    if upload_valid:
-        st.caption(f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total - within limits.")
+        def _retrieve():
+            with store_context_mgr() as store:
+                return retrieve_documents(store, query, CONFIG.retrieval_k)
+
+        ok, retrieval_result = run_step("Searching Documents", _retrieve)
+        if ok:
+            raw_results, query_metrics = retrieval_result
+            ok, context_result = run_step("Building Context", build_context, raw_results)
+            if ok:
+                context, sources = context_result
+                prompt = build_prompt(query, context)
+                ok, response = run_step("Generating Answer", llm.invoke, prompt)
+                if ok:
+                    answer = response.content
+                    st.markdown("## Answer")
+                    st.write(answer)
+
+                    st.markdown("### Retrieval Metrics")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Qdrant Retrieval Time", f"{query_metrics.qdrant_retrieval_time:.4f}s")
+                    with col2:
+                        st.metric("Overall Retrieval Time", f"{query_metrics.retrieval_time:.4f}s")
+                    with col3:
+                        st.metric("Configured Chunk Size", f"{CONFIG.chunk_size} chars")
+
+                    st.markdown("## Source PDFs")
+                    for source in sorted(set(sources)):
+                        st.write(f"- {source}")
+
+                    with st.expander("Retrieved Chunks"):
+                        for index, (doc, score) in enumerate(raw_results, start=1):
+                            st.markdown(f"### Chunk {index}")
+                            st.write(f"Source: {doc.metadata.get('source_pdf') or doc.metadata.get('filename') or 'Unknown'}")
+                            st.write(f"Page: {doc.metadata.get('page')}")
+                            st.write(f"Chunk ID: {doc.metadata.get('chunk_id')}")
+                            st.write(f"Chunk Index: {doc.metadata.get('chunk_index')}")
+                            st.write(f"Score: {score:.4f}")
+                            st.write(f"Characters: {doc.metadata.get('char_count')}")
+                            st.text(doc.page_content[:500])
+                            st.divider()
+
+        if st.session_state.pipeline_failed:
+            st.error("Answer generation stopped due to the failed step above.")
 
 
 def render_indexing_results(metrics, summary, db_already_existed):
@@ -134,93 +220,88 @@ def render_indexing_results(metrics, summary, db_already_existed):
             st.write(line)
 
 
-if uploaded_files and upload_valid and st.button("Process PDFs"):
-    st.session_state.pipeline_failed = False
-    st.session_state.last_ingestion_summary = None
-    splitter = build_text_splitter()
-    db_already_existed = vector_db_exists(SESSION_ID)
-    init_start = time.time()
-
-    def _ingest():
-        with vector_db_session(SESSION_ID, embeddings) as store:
-            return ingest_uploaded_files(
-                uploaded_files=uploaded_files,
-                session_id=SESSION_ID,
-                vector_db=store,
-                splitter=splitter,
-            )
-
-    ok, ingestion_result = run_step("Processing PDFs in batches", _ingest)
-    if ok:
-        metrics, summary = ingestion_result
-        metrics.qdrant_init_time = time.time() - init_start
-        metrics.db_size_mb = get_db_size_mb(SESSION_ID)
-        st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + summary.total_chunks
-        st.session_state.metrics = metrics.as_dict()
-        st.session_state.last_ingestion_summary = summary
-        append_jsonl_record(
-            CONFIG.experiment_log_file,
-            {"timestamp": time.time(), "session_id": SESSION_ID, "metrics": metrics.as_dict()},
+if selected_mode == "Qdrant Cloud Mode":
+    if cloud_connected and cloud_vector_count > 0:
+        st.caption(f"Querying Qdrant Cloud collection `{CONFIG.collection_name}` ({cloud_vector_count:,} vectors)")
+        render_qa_interface(
+            lambda: cloud_vector_db_session(embeddings),
+            placeholder_text="Ask something about the indexed PDFs...",
         )
-        render_indexing_results(metrics, summary, db_already_existed)
-
-
-db_exists = vector_db_exists(SESSION_ID)
-
-if db_exists:
-    query = st.text_input("Ask a question", placeholder="Ask something about the uploaded PDFs...")
-
-    if st.button("Get Answer") and query:
-        st.session_state.pipeline_failed = False
-        logging.info("User Query | %s | %s", time.strftime("%Y-%m-%d %H:%M:%S"), query)
-
-        def _retrieve():
-            with vector_db_session(SESSION_ID, embeddings) as store:
-                return retrieve_documents(store, query, CONFIG.retrieval_k)
-
-        ok, retrieval_result = run_step("Searching Documents", _retrieve)
-        if ok:
-            raw_results, query_metrics = retrieval_result
-            ok, context_result = run_step("Building Context", build_context, raw_results)
-            if ok:
-                context, sources = context_result
-                prompt = build_prompt(query, context)
-                ok, response = run_step("Generating Answer", llm.invoke, prompt)
-                if ok:
-                    answer = response.content
-                    st.markdown("## Answer")
-                    st.write(answer)
-
-                    st.markdown("### Retrieval Metrics")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Qdrant Retrieval Time", f"{query_metrics.qdrant_retrieval_time:.4f}s")
-                    with col2:
-                        st.metric("Overall Retrieval Time", f"{query_metrics.retrieval_time:.4f}s")
-                    with col3:
-                        st.metric("Configured Chunk Size", f"{CONFIG.chunk_size} chars")
-
-                    st.markdown("## Source PDFs")
-                    for source in sorted(set(sources)):
-                        st.write(f"- {source}")
-
-                    with st.expander("Retrieved Chunks"):
-                        for index, (doc, score) in enumerate(raw_results, start=1):
-                            st.markdown(f"### Chunk {index}")
-                            st.write(f"Source: {doc.metadata.get('source_pdf') or doc.metadata.get('filename') or 'Unknown'}")
-                            st.write(f"Page: {doc.metadata.get('page')}")
-                            st.write(f"Chunk ID: {doc.metadata.get('chunk_id')}")
-                            st.write(f"Chunk Index: {doc.metadata.get('chunk_index')}")
-                            st.write(f"Score: {score:.4f}")
-                            st.write(f"Characters: {doc.metadata.get('char_count')}")
-                            st.text(doc.page_content[:500])
-                            st.divider()
-
-        if st.session_state.pipeline_failed:
-            st.error("Answer generation stopped due to the failed step above.")
+    elif cloud_connected:
+        st.warning(f"Connected to Qdrant Cloud collection `{CONFIG.collection_name}`, but it currently contains 0 vectors.")
+        st.markdown(
+            "**How to index documents into Qdrant Cloud:**\n\n"
+            "1. Open `colab_ingestion.ipynb` in [Google Colab](https://colab.research.google.com).\n"
+            "2. Fill in your `QDRANT_URL` and `QDRANT_API_KEY`.\n"
+            "3. Run all cells with GPU enabled to index your PDF corpus directly.\n"
+            "4. Return here and refresh this page to query your indexed data."
+        )
+    else:
+        st.error("Unable to connect to Qdrant Cloud.")
+        st.info(
+            "Please check that `QDRANT_URL` and `QDRANT_API_KEY` are configured in "
+            "Streamlit Cloud Secrets or `.streamlit/secrets.toml`."
+        )
 else:
-    st.info("Upload PDFs and click Process PDFs.")
+    # Upload PDFs (Session)
+    uploaded_files = st.file_uploader("Upload PDF Files", type=["pdf"], accept_multiple_files=True)
+    st.caption(f"Limit: {CONFIG.max_files} files, {CONFIG.max_total_mb} MB total per session.")
+    st.info(
+        "💡 **Large Collections:** In-browser uploads on Streamlit Community Cloud are capped at 200 MB. "
+        "For large datasets (100+ or 1,600+ PDFs), run `colab_ingestion.ipynb` in Google Colab with GPU acceleration "
+        "to index directly into Qdrant Cloud, then switch to **Qdrant Cloud Mode** above."
+    )
 
+    upload_valid = True
+    if uploaded_files:
+        total_size_mb = sum(file.size for file in uploaded_files) / (1024 * 1024)
+        if len(uploaded_files) > CONFIG.max_files:
+            st.error(f"Too many files: limit is {CONFIG.max_files}.")
+            upload_valid = False
+        if total_size_mb > CONFIG.max_total_mb:
+            st.error(f"Upload too large: limit is {CONFIG.max_total_mb} MB.")
+            upload_valid = False
+        if upload_valid:
+            st.caption(f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total - within limits.")
+
+    if uploaded_files and upload_valid and st.button("Process PDFs"):
+        st.session_state.pipeline_failed = False
+        st.session_state.last_ingestion_summary = None
+        splitter = build_text_splitter()
+        db_already_existed = vector_db_exists(SESSION_ID)
+        init_start = time.time()
+
+        def _ingest():
+            with vector_db_session(SESSION_ID, embeddings) as store:
+                return ingest_uploaded_files(
+                    uploaded_files=uploaded_files,
+                    session_id=SESSION_ID,
+                    vector_db=store,
+                    splitter=splitter,
+                )
+
+        ok, ingestion_result = run_step("Processing PDFs in batches", _ingest)
+        if ok:
+            metrics, summary = ingestion_result
+            metrics.qdrant_init_time = time.time() - init_start
+            metrics.db_size_mb = get_db_size_mb(SESSION_ID)
+            st.session_state.chunk_count = st.session_state.get("chunk_count", 0) + summary.total_chunks
+            st.session_state.metrics = metrics.as_dict()
+            st.session_state.last_ingestion_summary = summary
+            append_jsonl_record(
+                CONFIG.experiment_log_file,
+                {"timestamp": time.time(), "session_id": SESSION_ID, "metrics": metrics.as_dict()},
+            )
+            render_indexing_results(metrics, summary, db_already_existed)
+
+    db_exists = vector_db_exists(SESSION_ID)
+    if db_exists:
+        render_qa_interface(
+            lambda: vector_db_session(SESSION_ID, embeddings),
+            placeholder_text="Ask something about the uploaded PDFs...",
+        )
+    else:
+        st.info("Upload PDFs and click Process PDFs.")
 
 if not get_groq_api_key():
     st.warning("`GROQ_API_KEY` is not set. Question answering will fail until it is configured.")
