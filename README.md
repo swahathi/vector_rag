@@ -109,7 +109,7 @@ User Question ----------+
                          |
                          v
                   Groq Llama LLM
-               (llama-3.1-8b-instant)
+               (openai/gpt-oss-20b)
                          |
                          v
                 Grounded Answer
@@ -146,7 +146,7 @@ User Question ----------+
 
 7. **Generation**
 
-   Retrieved chunks are assembled into a structured prompt. The prompt instructs the model to answer using only the retrieved context, not to invent technical identifiers, and to report conflicting information verbatim. The Groq-hosted `llama-3.1-8b-instant` model generates the response. LLM responses are cached in a local SQLite database via `SQLiteCache`.
+   Retrieved chunks are assembled into a structured prompt. The prompt instructs the model to answer using only the retrieved context, not to invent technical identifiers, and to report conflicting information verbatim. The Groq-hosted `openai/gpt-oss-20b` model generates the response. LLM responses are cached in a local SQLite database via `SQLiteCache`.
 
 8. **Presentation**
 
@@ -252,7 +252,7 @@ The following are placeholder entries in the format used to document observed fa
 
 - **Small question set.** A small manually written question set may not cover the full range of query types or document topics. Results may not generalise.
 - **Author-written questions.** Questions and ground-truth answers are written by the same person who built the system. This introduces the risk of unconsciously favouring query phrasings that the system handles well.
-- **LLM non-determinism.** `llama-3.1-8b-instant` is called via the Groq API without fixing a random seed (the API does not expose one). The same question may receive different answers across runs. LLM response caching (`SQLiteCache`) mitigates this for repeated identical prompts but does not eliminate variability for new queries.
+- **LLM non-determinism.** `openai/gpt-oss-20b` is called via the Groq API without fixing a random seed (the API does not expose one). The same question may receive different answers across runs. LLM response caching (`SQLiteCache`) mitigates this for repeated identical prompts but does not eliminate variability for new queries.
 - **LLM judge variability.** If automated LLM-based scoring is used in future, the judge model introduces its own error and bias.
 
 ---
@@ -284,7 +284,7 @@ The following are placeholder entries in the format used to document observed fa
 * **LangChain** (`langchain`, `langchain-community`, `langchain-qdrant`, `langchain-huggingface`, `langchain-classic`) — pipeline orchestration
 * **sentence-transformers / all-MiniLM-L6-v2** — local CPU embedding model (384-dim)
 * **Qdrant 1.5.9** — persistent vector store (cosine similarity via normalised L2)
-* **Groq / llama-3.1-8b-instant** — hosted LLM for answer generation
+* **Groq / openai/gpt-oss-20b** — hosted LLM for answer generation
 * **PyPDF** — PDF text extraction
 
 ---
