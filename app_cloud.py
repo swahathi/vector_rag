@@ -38,8 +38,9 @@ if "pipeline_failed" not in st.session_state:
 # Load models (cached across reruns)
 # ---------------------------------------------------------------------------
 
-embeddings = load_embeddings()
-llm = load_llm()
+with st.spinner("Initializing models..."):
+    embeddings = load_embeddings()
+    llm = load_llm()
 
 # ---------------------------------------------------------------------------
 # Sidebar — cloud collection status

@@ -50,8 +50,9 @@ def run_step(label, func, *args, **kwargs):
             return False, None
 
 
-embeddings = load_embeddings()
-llm = load_llm()
+with st.spinner("Initializing models..."):
+    embeddings = load_embeddings()
+    llm = load_llm()
 
 with st.sidebar:
     st.markdown("### Session")
