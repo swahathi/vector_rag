@@ -22,7 +22,7 @@ class AppConfig:
 
     # Document processing
     max_files: int = 1600
-    max_total_mb: int = 10000
+    max_total_mb: int = 200
     chunk_size: int = 1000
     chunk_overlap: int = 200
     chunk_batch_size: int = 100
