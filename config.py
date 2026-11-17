@@ -35,7 +35,7 @@ class AppConfig:
     embedding_namespace: str = "all-MiniLM-L6-v2"
 
     # LLM
-    groq_model_name: str = "llama-3.1-8b-instant"
+    groq_model_name: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
     @property
     def vector_db_root_path(self) -> Path:
