@@ -1,4 +1,4 @@
-﻿--index-url https://download.pytorch.org/whl/cpu
+--index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple/
 
 streamlit
@@ -8,10 +8,10 @@ langchain-text-splitters
 langchain-core
 langchain-classic
 langchain-groq
-langchain-chroma
+langchain-qdrant
 langchain-huggingface
 
-chromadb==1.5.9
+qdrant-client
 sentence-transformers
 transformers
 torch

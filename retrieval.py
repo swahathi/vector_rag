@@ -9,8 +9,8 @@ def retrieve_documents(vector_db, query: str, k: int):
     metrics = QueryMetrics()
     start = time.time()
     results = vector_db.similarity_search_with_relevance_scores(query, k=k)
-    metrics.chroma_retrieval_time = time.time() - start
-    metrics.retrieval_time = metrics.chroma_retrieval_time
+    metrics.qdrant_retrieval_time = time.time() - start
+    metrics.retrieval_time = metrics.qdrant_retrieval_time
     return results, metrics
 
 
@@ -18,13 +18,13 @@ def build_context(raw_results):
     context_parts = []
     sources = set()
     for doc, _score in raw_results:
-        source = doc.metadata.get("source_pdf", "Unknown")
+        source = doc.metadata.get("source_pdf") or doc.metadata.get("filename") or "Unknown"
         sources.add(source)
         context_parts.append(
             f"""
         SOURCE: {source}
-        PAGE: {doc.metadata.get("page")}
-        CHUNK: {doc.metadata.get("chunk_id")}
+        PAGE: {doc.metadata.get("page", "Unknown")}
+        CHUNK: {doc.metadata.get("chunk_id", "Unknown")}
         {doc.page_content}
         """
         )
